@@ -12,22 +12,12 @@ class MarketStatus(Enum):
     CLOSED = "closed"
     SUSPENDED = "suspended"
 
-class MarketCategory(Enum):
-    """Market category enumeration."""
-    POLITICS = "politics"
-    ECONOMICS = "economics"
-    SPORTS = "sports"
-    ENTERTAINMENT = "entertainment"
-    TECHNOLOGY = "technology"
-    OTHER = "other"
-
 @dataclass
 class Market:
     """Represents a Kalshi market."""
     ticker: str
     title: str
     description: str
-    category: MarketCategory
     status: MarketStatus
     volume: int
     open_interest: int
@@ -59,7 +49,9 @@ class Market:
     @property
     def days_to_expiry(self) -> int:
         """Calculate days until expiry."""
-        return (self.expiry_date - datetime.now()).days
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        return (self.expiry_date - now).days
 
 @dataclass
 class ScreeningCriteria:
@@ -69,7 +61,7 @@ class ScreeningCriteria:
     min_liquidity: int
     max_time_to_expiry_days: int
     min_open_interest: int
-    categories: List[MarketCategory]
+    categories: Optional[List[str]] = None
     
     def __post_init__(self):
         """Validate criteria after initialization."""
@@ -81,16 +73,48 @@ class ScreeningCriteria:
             raise ValueError("Minimum liquidity must be non-negative")
 
 @dataclass
+class Event:
+    """Represents a Kalshi event containing multiple markets."""
+    ticker: str
+    title: str
+    description: str
+    category: str
+    series_ticker: str
+    markets: List[Market]
+    open_date: datetime
+    close_date: datetime
+    
+    @property
+    def open_markets(self) -> List[Market]:
+        """Get only open markets from this event."""
+        return [market for market in self.markets if market.status == MarketStatus.OPEN]
+    
+    @property
+    def total_volume(self) -> int:
+        """Calculate total volume across all markets in this event."""
+        return sum(market.volume for market in self.markets)
+    
+    @property
+    def total_open_interest(self) -> int:
+        """Calculate total open interest across all markets in this event."""
+        return sum(market.open_interest for market in self.markets)
+    
+
+@dataclass
 class ScreeningResult:
     """Result of market screening."""
     market: Market
-    score: float
-    reasons: List[str]
-    is_profitable: bool
-    timestamp: datetime
+    event: Optional[Event] = None
+    score: float = 0.0
+    reasons: List[str] = None
+    is_profitable: bool = False
+    timestamp: datetime = None
     
     def __post_init__(self):
         """Set timestamp if not provided."""
         if not hasattr(self, 'timestamp') or self.timestamp is None:
-            self.timestamp = datetime.now()
+            from datetime import timezone
+            self.timestamp = datetime.now(timezone.utc)
+        if self.reasons is None:
+            self.reasons = []
 

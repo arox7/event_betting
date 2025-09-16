@@ -17,6 +17,13 @@ def test_setup():
     try:
         # Initialize components
         config = Config()
+        
+        # Show environment info
+        if config.KALSHI_DEMO_MODE:
+            logger.info("🌐 Using DEMO environment")
+        else:
+            logger.info("🌐 Using PRODUCTION environment")
+        
         kalshi_client = KalshiAPIClient(config)
         screener = MarketScreener(kalshi_client, config)
         
@@ -33,7 +40,7 @@ def test_setup():
         if balance is not None:
             logger.info(f"✅ Authentication successful - Balance: ${balance:.2f}")
         else:
-            logger.warning("⚠️ Not authenticated - running in read-only mode")
+            logger.warning("⚠️ Authentication failed - check your API credentials")
         
         # Test market fetching
         logger.info("Testing market fetching...")

@@ -6,4 +6,5 @@ python-dotenv>=1.0.0
 schedule>=1.2.0
 requests>=2.31.0
 plotly>=5.15.0
+cryptography>=41.0.0
 

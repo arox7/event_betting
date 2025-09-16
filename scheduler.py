@@ -100,19 +100,20 @@ class MarketScheduler:
             self.total_runs += 1
             start_time = time.time()
             
-            # Fetch markets
-            markets = self.kalshi_client.get_markets(limit=100, status="open")
+            # Fetch events
+            events = self.kalshi_client.get_events(limit=100, status="open", max_events=self.config.MAX_EVENTS)
             
-            if not markets:
-                logger.warning("No markets found in screening cycle")
+            if not events:
+                logger.warning("No events found in screening cycle")
                 return
             
-            # Screen markets
-            results = self.screener.screen_markets(markets)
+            # Screen events and their markets
+            results = self.screener.screen_events(events)
             
             # Update statistics
             self.successful_runs += 1
-            self.last_run_time = datetime.now()
+            from datetime import timezone
+            self.last_run_time = datetime.now(timezone.utc)
             self.last_results = results
             
             # Notify callbacks
@@ -134,7 +135,8 @@ class MarketScheduler:
                     pass
             
             elapsed = time.time() - start_time
-            logger.info(f"Screening cycle completed in {elapsed:.2f}s - {len(markets)} markets, {len([r for r in results if r.is_profitable])} opportunities")
+            total_markets = sum(len(event.markets) for event in events)
+            logger.info(f"Screening cycle completed in {elapsed:.2f}s - {len(events)} events ({total_markets} markets), {len([r for r in results if r.is_profitable])} opportunities")
             
         except Exception as e:
             logger.error(f"Error in screening cycle: {e}")
@@ -171,7 +173,8 @@ class MarketDataCollector:
     def add_results(self, results: List[ScreeningResult]):
         """Add screening results to history."""
         with self.lock:
-            timestamp = datetime.now()
+            from datetime import timezone
+            timestamp = datetime.now(timezone.utc)
             self.history.append({
                 'timestamp': timestamp,
                 'results': results,
@@ -192,7 +195,8 @@ class MarketDataCollector:
     def get_summary_stats(self, hours: int = 24) -> dict:
         """Get summary statistics for the last N hours."""
         with self.lock:
-            cutoff_time = datetime.now() - timedelta(hours=hours)
+            from datetime import timezone
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
             recent_data = [d for d in self.history if d['timestamp'] >= cutoff_time]
             
             if not recent_data:

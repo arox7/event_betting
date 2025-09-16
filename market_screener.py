@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 from datetime import datetime
 import numpy as np
 
-from models import Market, ScreeningCriteria, ScreeningResult, MarketCategory, MarketStatus
+from models import Market, ScreeningCriteria, ScreeningResult, MarketStatus, Event
 from kalshi_client import KalshiAPIClient
 from config import Config
 
@@ -29,7 +29,7 @@ class MarketScreener:
             min_liquidity=self.config.MIN_LIQUIDITY,
             max_time_to_expiry_days=self.config.MAX_TIME_TO_EXPIRY_DAYS,
             min_open_interest=100,  # Minimum open interest
-            categories=[MarketCategory.POLITICS, MarketCategory.ECONOMICS]  # Focus on these categories
+            categories=None  # No category filtering by default
         )
     
     def screen_markets(self, markets: List[Market]) -> List[ScreeningResult]:
@@ -54,9 +54,37 @@ class MarketScreener:
         
         # Sort by score (highest first)
         results.sort(key=lambda x: x.score, reverse=True)
-        
-        logger.info(f"Screened {len(markets)} markets, found {len([r for r in results if r.is_profitable])} profitable opportunities")
         return results
+    
+    def screen_events(self, events: List[Event]) -> List[ScreeningResult]:
+        """
+        Screen events for profitable market opportunities.
+        
+        Args:
+            events: List of events to screen
+            
+        Returns:
+            List of screening results with event context
+        """
+        all_results = []
+        
+        for event in events:
+            # Screen all markets in this event
+            market_results = self.screen_markets(event.markets)
+            
+            # Add event context to each result
+            for result in market_results:
+                result.event = event
+                all_results.append(result)
+        
+        # Sort by score (highest first)
+        all_results.sort(key=lambda x: x.score, reverse=True)
+        
+        total_markets = sum(len(event.markets) for event in events)
+        profitable_count = len([r for r in all_results if r.is_profitable])
+        
+        logger.info(f"Screened {len(events)} events ({total_markets} total markets), found {profitable_count} profitable opportunities")
+        return all_results
     
     def _screen_single_market(self, market: Market) -> ScreeningResult:
         """
@@ -73,31 +101,37 @@ class MarketScreener:
         
         # Check basic requirements
         if not self._check_basic_requirements(market, reasons):
+            from datetime import timezone
             return ScreeningResult(
                 market=market,
                 score=0.0,
                 reasons=reasons,
                 is_profitable=False,
-                timestamp=datetime.now()
+                timestamp=datetime.now(timezone.utc)
             )
         
-        # Calculate profitability score
-        score += self._calculate_volume_score(market)
-        score += self._calculate_spread_score(market, reasons)
-        score += self._calculate_liquidity_score(market)
-        score += self._calculate_time_score(market)
-        score += self._calculate_category_score(market)
-        score += self._calculate_volatility_score(market, reasons)
+        # Check spread requirement (the main profitability criterion)
+        if market.spread_percentage is not None:
+            if market.spread_percentage <= self.screening_criteria.max_spread_percentage:
+                reasons.append(f"Profitable spread: {market.spread_percentage:.1%} <= {self.screening_criteria.max_spread_percentage:.1%}")
+                score = 1.0  # Simple pass/fail scoring
+                is_profitable = True
+            else:
+                reasons.append(f"Spread too high: {market.spread_percentage:.1%} > {self.screening_criteria.max_spread_percentage:.1%}")
+                score = 0.0
+                is_profitable = False
+        else:
+            reasons.append("No spread data available")
+            score = 0.0
+            is_profitable = False
         
-        # Determine if profitable
-        is_profitable = score >= 0.6 and len([r for r in reasons if "profitable" in r.lower()]) > 0
-        
+        from datetime import timezone
         return ScreeningResult(
             market=market,
             score=score,
             reasons=reasons,
             is_profitable=is_profitable,
-            timestamp=datetime.now()
+            timestamp=datetime.now(timezone.utc)
         )
     
     def _check_basic_requirements(self, market: Market, reasons: List[str]) -> bool:
@@ -122,85 +156,24 @@ class MarketScreener:
             reasons.append(f"Open interest too low: {market.open_interest} < {self.screening_criteria.min_open_interest}")
             return False
         
+        # Must have minimum liquidity (volume + open interest)
+        total_liquidity = market.volume + market.open_interest
+        if total_liquidity < self.screening_criteria.min_liquidity:
+            reasons.append(f"Liquidity too low: {total_liquidity} < {self.screening_criteria.min_liquidity}")
+            return False
+        
         # Must be within time limit
         if market.days_to_expiry > self.screening_criteria.max_time_to_expiry_days:
             reasons.append(f"Too far from expiry: {market.days_to_expiry} days")
             return False
         
-        # Must be in allowed categories
-        if market.category not in self.screening_criteria.categories:
-            reasons.append(f"Category not allowed: {market.category.value}")
+        # Must be in allowed categories (if categories are specified)
+        if self.screening_criteria.categories and market.category not in self.screening_criteria.categories:
+            reasons.append(f"Category not allowed: {market.category}")
             return False
         
         return True
     
-    def _calculate_volume_score(self, market: Market) -> float:
-        """Calculate score based on volume."""
-        # Higher volume = higher score (capped at 0.2)
-        volume_score = min(market.volume / 10000, 0.2)
-        return volume_score
-    
-    def _calculate_spread_score(self, market: Market, reasons: List[str]) -> float:
-        """Calculate score based on spread."""
-        if market.spread_percentage is None:
-            return 0.0
-        
-        # Lower spread = higher score
-        if market.spread_percentage <= 0.02:  # 2% or less
-            reasons.append("Tight spread - profitable for market making")
-            return 0.3
-        elif market.spread_percentage <= 0.05:  # 5% or less
-            reasons.append("Reasonable spread")
-            return 0.15
-        else:
-            reasons.append("Wide spread - less profitable")
-            return 0.0
-    
-    def _calculate_liquidity_score(self, market: Market) -> float:
-        """Calculate score based on liquidity."""
-        # Estimate liquidity from bid/ask sizes (simplified)
-        liquidity = market.volume + market.open_interest
-        if liquidity >= 5000:
-            return 0.2
-        elif liquidity >= 2000:
-            return 0.1
-        else:
-            return 0.0
-    
-    def _calculate_time_score(self, market: Market) -> float:
-        """Calculate score based on time to expiry."""
-        days = market.days_to_expiry
-        
-        # Sweet spot is 7-14 days
-        if 7 <= days <= 14:
-            return 0.2
-        elif 3 <= days <= 21:
-            return 0.1
-        else:
-            return 0.0
-    
-    def _calculate_category_score(self, market: Market) -> float:
-        """Calculate score based on market category."""
-        # Politics and economics tend to be more liquid
-        if market.category in [MarketCategory.POLITICS, MarketCategory.ECONOMICS]:
-            return 0.1
-        else:
-            return 0.05
-    
-    def _calculate_volatility_score(self, market: Market, reasons: List[str]) -> float:
-        """Calculate score based on price volatility."""
-        if market.mid_price is None:
-            return 0.0
-        
-        # Markets closer to 50/50 tend to be more volatile and profitable
-        mid_price = market.mid_price
-        if 0.3 <= mid_price <= 0.7:
-            reasons.append("Good volatility range for market making")
-            return 0.1
-        elif 0.2 <= mid_price <= 0.8:
-            return 0.05
-        else:
-            return 0.0
     
     def get_top_opportunities(self, results: List[ScreeningResult], limit: int = 10) -> List[ScreeningResult]:
         """

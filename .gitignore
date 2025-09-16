@@ -1,3 +1,4 @@
 .env
 .private_key.pem
-
+market_bot.log
+__pycache__/*
