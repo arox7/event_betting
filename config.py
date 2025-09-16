@@ -1,0 +1,31 @@
+"""
+Configuration settings for the Kalshi market making bot.
+"""
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+class Config:
+    """Configuration class for the application."""
+    
+    # Kalshi API Configuration
+    KALSHI_API_KEY_ID = os.getenv('KALSHI_API_KEY_ID', '')
+    KALSHI_PRIVATE_KEY_PATH = os.getenv('KALSHI_PRIVATE_KEY_PATH', '')
+    KALSHI_API_HOST = os.getenv('KALSHI_API_HOST', 'https://api.elections.kalshi.com/trade-api/v2')
+    
+    # Dashboard Configuration
+    DASHBOARD_PORT = int(os.getenv('DASHBOARD_PORT', 8501))
+    DASHBOARD_HOST = os.getenv('DASHBOARD_HOST', 'localhost')
+    
+    # Market Screening Parameters
+    MIN_VOLUME = 1000  # Minimum volume for consideration
+    MAX_SPREAD_PERCENTAGE = 0.05  # Maximum spread percentage (5%)
+    MIN_LIQUIDITY = 500  # Minimum liquidity requirement
+    MAX_TIME_TO_EXPIRY_DAYS = 30  # Maximum days until expiry
+    
+    # Update intervals
+    MARKET_UPDATE_INTERVAL = 1  # seconds
+    DASHBOARD_REFRESH_INTERVAL = 5  # seconds
+

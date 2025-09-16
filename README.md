@@ -1,0 +1,181 @@
+# Kalshi Market Making Bot
+
+A Python-based market making bot for Kalshi that screens markets for profitable trading opportunities and displays them on a real-time dashboard.
+
+## Features
+
+- **Real-time Market Screening**: Screens Kalshi markets every second for profitable characteristics
+- **Interactive Dashboard**: Streamlit-based web interface for visualizing opportunities
+- **Configurable Criteria**: Customizable screening parameters (volume, spread, liquidity, etc.)
+- **Market Analysis**: Detailed scoring system based on multiple factors
+- **Historical Tracking**: Collects and stores market data over time
+- **API Integration**: Full integration with Kalshi's Python SDK
+
+## Installation
+
+1. Clone the repository:
+```bash
+git clone <repository-url>
+cd event_betting
+```
+
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+3. Set up environment variables:
+```bash
+cp .env.example .env
+# Edit .env with your Kalshi API credentials
+```
+
+## Configuration
+
+Create a `.env` file with your Kalshi API credentials:
+
+```env
+# Kalshi API Configuration
+KALSHI_API_KEY_ID=your-api-key-id-here
+KALSHI_PRIVATE_KEY_PATH=path/to/private_key.pem
+KALSHI_API_HOST=https://api.elections.kalshi.com/trade-api/v2
+
+# Dashboard Configuration
+DASHBOARD_PORT=8501
+DASHBOARD_HOST=localhost
+```
+
+## Usage
+
+### Running the Bot
+
+Start the market screening bot:
+```bash
+python main.py --mode bot
+```
+
+This will:
+- Connect to the Kalshi API
+- Start screening markets every second
+- Log statistics and opportunities
+- Store historical data
+
+### Running the Dashboard
+
+Start the web dashboard:
+```bash
+python main.py --mode dashboard
+```
+
+Or run directly:
+```bash
+streamlit run dashboard.py
+```
+
+The dashboard will be available at `http://localhost:8501`
+
+## Dashboard Features
+
+- **Real-time Market Data**: Live updates of market opportunities
+- **Summary Metrics**: Total markets, profitable opportunities, success rate
+- **Top Opportunities Table**: Ranked list of best trading opportunities
+- **Score Distribution**: Histogram of market scores
+- **Category Breakdown**: Pie chart of markets by category
+- **Market Details**: Detailed view of individual markets
+- **Auto-refresh**: Optional automatic refresh every 5 seconds
+
+## Screening Criteria
+
+The bot screens markets based on:
+
+- **Volume**: Minimum trading volume requirement
+- **Spread**: Maximum bid-ask spread percentage
+- **Liquidity**: Minimum liquidity requirements
+- **Time to Expiry**: Maximum days until market expiry
+- **Category**: Focus on specific market categories (politics, economics)
+- **Price Range**: Optimal volatility ranges for market making
+
+## Scoring System
+
+Markets are scored based on:
+
+1. **Volume Score** (0-0.2): Higher volume = higher score
+2. **Spread Score** (0-0.3): Tighter spreads = higher score
+3. **Liquidity Score** (0-0.2): Higher liquidity = higher score
+4. **Time Score** (0-0.2): Optimal time to expiry = higher score
+5. **Category Score** (0-0.1): Preferred categories = higher score
+6. **Volatility Score** (0-0.1): Good volatility range = higher score
+
+Total possible score: 1.0
+
+## Project Structure
+
+```
+event_betting/
+├── main.py                 # Main application entry point
+├── config.py              # Configuration settings
+├── models.py              # Data models and classes
+├── kalshi_client.py       # Kalshi API client wrapper
+├── market_screener.py     # Market screening logic
+├── scheduler.py           # Task scheduler
+├── dashboard.py           # Streamlit dashboard
+├── requirements.txt       # Python dependencies
+└── README.md             # This file
+```
+
+## API Requirements
+
+To use the full functionality, you'll need:
+
+1. **Kalshi API Key**: Get from your Kalshi account
+2. **Private Key**: RSA private key for authentication
+3. **Account Balance**: For trading (optional for screening only)
+
+## Logging
+
+The bot logs to both console and file (`market_bot.log`):
+
+- Market screening results
+- API connection status
+- Error messages
+- Performance statistics
+
+## Development
+
+### Adding New Screening Criteria
+
+1. Update `ScreeningCriteria` in `models.py`
+2. Add scoring logic in `market_screener.py`
+3. Update dashboard to display new criteria
+
+### Customizing the Dashboard
+
+The dashboard is built with Streamlit and can be customized by modifying `dashboard.py`:
+
+- Add new charts and visualizations
+- Modify the layout and styling
+- Add new filtering options
+
+## Troubleshooting
+
+### Common Issues
+
+1. **API Connection Failed**: Check your API credentials and network connection
+2. **No Markets Found**: Verify the API is returning data and check filters
+3. **Dashboard Not Loading**: Ensure Streamlit is installed and port is available
+
+### Debug Mode
+
+Enable debug logging by modifying the logging level in `main.py`:
+
+```python
+logging.basicConfig(level=logging.DEBUG)
+```
+
+## License
+
+This project is for educational and research purposes. Please ensure compliance with Kalshi's terms of service and applicable regulations.
+
+## Disclaimer
+
+This software is provided as-is for educational purposes. Trading involves risk, and past performance does not guarantee future results. Always do your own research and consider consulting with financial professionals before making trading decisions.
