@@ -5,6 +5,8 @@ import logging
 import signal
 import sys
 import time
+import subprocess
+import os
 from datetime import datetime
 
 from config import Config
@@ -72,7 +74,6 @@ class MarketMakingBot:
         self.running = True
         
         logger.info("🚀 Bot started successfully")
-        logger.info(f"📊 Screening markets every {self.config.MARKET_UPDATE_INTERVAL} second(s)")
         
         # Main loop
         self._main_loop()
@@ -114,21 +115,12 @@ class MarketMakingBot:
         stats = self.scheduler.get_statistics()
         summary = self.data_collector.get_summary_stats(hours=1)
         
-        logger.info("📈 Bot Statistics:")
-        logger.info(f"  Status: {'Running' if stats['is_running'] else 'Stopped'}")
-        logger.info(f"  Total runs: {stats['total_runs']}")
-        logger.info(f"  Success rate: {stats['success_rate']:.1%}")
-        logger.info(f"  Last run: {stats['last_run_time']}")
-        logger.info(f"  Avg markets/cycle: {summary['avg_markets_per_cycle']:.1f}")
-        logger.info(f"  Avg opportunities/cycle: {summary['avg_opportunities_per_cycle']:.1f}")
-        logger.info(f"  Avg score: {summary['avg_score']:.2f}")
+        logger.info(f"📈 Status: {'Running' if stats['is_running'] else 'Stopped'} | Runs: {stats['total_runs']} | Success: {stats['success_rate']:.1%} | Avg opportunities: {summary['avg_opportunities_per_cycle']:.1f}")
     
     def run_dashboard(self):
         """Run the Streamlit dashboard."""
-        import subprocess
-        import os
         
-        logger.info("Starting Streamlit dashboard...")
+        logger.info("Starting dashboard...")
         
         # Set environment variables for Streamlit
         env = os.environ.copy()

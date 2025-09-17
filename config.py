@@ -25,10 +25,13 @@ class Config:
     
     # Market Screening Parameters
     MIN_VOLUME = 1000  # Minimum volume for consideration
-    MAX_SPREAD_PERCENTAGE = 0.20  # Maximum spread percentage (5%)
+    MIN_VOLUME_24H = 500  # Minimum 24h volume
+    MAX_SPREAD_PERCENTAGE = 0.20  # Maximum spread percentage (20%)
+    MAX_SPREAD_CENTS = 20  # Maximum spread in cents
+    MIN_SPREAD_CENTS = 1  # Minimum spread in cents
     MIN_LIQUIDITY = 500  # Minimum liquidity requirement
     MAX_TIME_TO_EXPIRY_DAYS = 365  # Maximum days until expiry
-    
+    MIN_OPEN_INTEREST = 100  # Minimum open interest
     # Update intervals
     MARKET_UPDATE_INTERVAL = 1  # seconds
     DASHBOARD_REFRESH_INTERVAL = 5  # seconds

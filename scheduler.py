@@ -4,11 +4,11 @@ Scheduler for running market screening every second.
 import time
 import threading
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Callable, Optional
 import queue
 
-from models import Market, ScreeningResult
+from models import Market, ScreeningResult, utc_now
 from kalshi_client import KalshiAPIClient
 from market_screener import MarketScreener
 from config import Config
@@ -55,7 +55,7 @@ class MarketScheduler:
             daemon=True
         )
         self.thread.start()
-        logger.info(f"Scheduler started with {interval_seconds}s interval")
+        logger.info(f"Scheduler started ({interval_seconds}s interval)")
     
     def stop(self):
         """Stop the scheduler."""
@@ -70,8 +70,6 @@ class MarketScheduler:
     
     def _run_loop(self, interval_seconds: int):
         """Main scheduler loop."""
-        logger.info("Scheduler loop started")
-        
         while self.is_running:
             try:
                 start_time = time.time()
@@ -91,8 +89,6 @@ class MarketScheduler:
             except Exception as e:
                 logger.error(f"Error in scheduler loop: {e}")
                 time.sleep(interval_seconds)  # Wait before retrying
-        
-        logger.info("Scheduler loop ended")
     
     def _run_screening(self):
         """Run a single screening cycle."""
@@ -101,7 +97,7 @@ class MarketScheduler:
             start_time = time.time()
             
             # Fetch events
-            events = self.kalshi_client.get_events(limit=100, status="open", max_events=self.config.MAX_EVENTS)
+            events = self.kalshi_client.get_events(limit=100, status="active", max_events=200)
             
             if not events:
                 logger.warning("No events found in screening cycle")
@@ -112,8 +108,7 @@ class MarketScheduler:
             
             # Update statistics
             self.successful_runs += 1
-            from datetime import timezone
-            self.last_run_time = datetime.now(timezone.utc)
+            self.last_run_time = utc_now()
             self.last_results = results
             
             # Notify callbacks
@@ -136,7 +131,9 @@ class MarketScheduler:
             
             elapsed = time.time() - start_time
             total_markets = sum(len(event.markets) for event in events)
-            logger.info(f"Screening cycle completed in {elapsed:.2f}s - {len(events)} events ({total_markets} markets), {len([r for r in results if r.is_profitable])} opportunities")
+            passing_markets = len([r for r in results if r.score > 0])
+            if passing_markets > 0 or elapsed > 2.0:  # Only log if opportunities found or slow cycle
+                logger.info(f"Cycle: {elapsed:.1f}s | {len(events)} events ({total_markets} markets) | {passing_markets} opportunities")
             
         except Exception as e:
             logger.error(f"Error in screening cycle: {e}")
@@ -173,13 +170,12 @@ class MarketDataCollector:
     def add_results(self, results: List[ScreeningResult]):
         """Add screening results to history."""
         with self.lock:
-            from datetime import timezone
-            timestamp = datetime.now(timezone.utc)
+            timestamp = utc_now()
             self.history.append({
                 'timestamp': timestamp,
                 'results': results,
                 'total_markets': len(results),
-                'profitable_markets': len([r for r in results if r.is_profitable]),
+                'passing_markets': len([r for r in results if r.score > 0]),
                 'avg_score': sum(r.score for r in results) / len(results) if results else 0
             })
             
@@ -195,8 +191,7 @@ class MarketDataCollector:
     def get_summary_stats(self, hours: int = 24) -> dict:
         """Get summary statistics for the last N hours."""
         with self.lock:
-            from datetime import timezone
-            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+            cutoff_time = utc_now() - timedelta(hours=hours)
             recent_data = [d for d in self.history if d['timestamp'] >= cutoff_time]
             
             if not recent_data:
@@ -211,7 +206,7 @@ class MarketDataCollector:
             return {
                 'total_cycles': len(recent_data),
                 'avg_markets_per_cycle': sum(d['total_markets'] for d in recent_data) / len(recent_data),
-                'avg_opportunities_per_cycle': sum(d['profitable_markets'] for d in recent_data) / len(recent_data),
+                'avg_opportunities_per_cycle': sum(d['passing_markets'] for d in recent_data) / len(recent_data),
                 'avg_score': sum(d['avg_score'] for d in recent_data) / len(recent_data),
                 'best_score': max(d['avg_score'] for d in recent_data)
             }
