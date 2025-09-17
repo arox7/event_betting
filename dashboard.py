@@ -482,14 +482,12 @@ class MarketDashboard:
         
         df = pd.DataFrame(data)
         
-        # Display table with enhanced configuration and row selection
-        edited_df = st.data_editor(
+        # Display table with enhanced configuration
+        st.data_editor(
             df,
             use_container_width=True,
             hide_index=True,
             disabled=True,
-            on_select="rerun",
-            selection_mode="single-row",
             column_config={
                 "Kalshi Link": st.column_config.LinkColumn(
                     "Kalshi Link",
@@ -536,13 +534,26 @@ class MarketDashboard:
             }
         )
         
-        # Handle row selection for market details
-        if edited_df.selection.rows:
-            selected_row_index = list(edited_df.selection.rows)[0]
-            if selected_row_index < len(filtered_results):
-                selected_result = filtered_results[selected_row_index]
-                # Store selected market in session state
-                st.session_state.selected_market_ticker = selected_result.market.ticker
+        # Add selection buttons for each market
+        st.markdown("**Click a market below to view details:**")
+        
+        # Create columns for market selection buttons
+        num_markets_to_show = min(10, len(filtered_results))  # Show up to 10 markets
+        if num_markets_to_show > 0:
+            cols = st.columns(min(3, num_markets_to_show))  # Up to 3 columns
+            
+            for i, result in enumerate(filtered_results[:num_markets_to_show]):
+                col_index = i % 3
+                with cols[col_index]:
+                    market_label = f"{result.market.ticker[:10]}..."
+                    if st.button(
+                        market_label, 
+                        key=f"select_market_{result.market.ticker}",
+                        help=f"View details for {result.market.title[:30]}...",
+                        use_container_width=True
+                    ):
+                        st.session_state.selected_market_ticker = result.market.ticker
+                        st.rerun()
         
         # Summary stats for filtered results
         passing_count = len([r for r in filtered_results if r.score == 1.0])
