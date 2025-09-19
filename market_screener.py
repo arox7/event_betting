@@ -26,7 +26,7 @@ class MarketScreener:
         return ScreeningCriteria(
             min_volume=self.config.MIN_VOLUME,
             min_volume_24h=self.config.MIN_VOLUME_24H,
-            max_spread_percentage=self.config.MAX_SPREAD_PERCENTAGE,
+            max_spread_percentage=getattr(self.config, 'MAX_SPREAD_PERCENTAGE', None),
             max_spread_cents=self.config.MAX_SPREAD_CENTS,
             min_spread_cents=self.config.MIN_SPREAD_CENTS,
             min_liquidity=self.config.MIN_LIQUIDITY,
@@ -89,6 +89,13 @@ class MarketScreener:
         all_results = []
         
         for event in events:
+            # Check category filter first (if specified)
+            if (self.screening_criteria.categories is not None and 
+                len(self.screening_criteria.categories) > 0 and 
+                event.category not in self.screening_criteria.categories):
+                # Skip this event if it doesn't match category filter
+                continue
+            
             # Screen all markets in this event
             market_results = self.screen_markets(event.markets)
             
@@ -99,86 +106,43 @@ class MarketScreener:
         
         # Sort by score (highest first)
         all_results.sort(key=lambda x: x.score, reverse=True)
-        
-        # Sort by score (highest first)
-        all_results.sort(key=lambda x: x.score, reverse=True)
         return all_results
     
     def _screen_single_market(self, market: Market) -> ScreeningResult:
         """
-        Screen a single market against the screening criteria.
+        Screen a single market - all markets pass by default unless explicitly filtered out.
         
         Args:
             market: Market to screen
             
         Returns:
-            Screening result with pass/fail flag
+            Screening result (always passes unless filtered)
         """
         reasons = []
-        passes_filters = True
         
-        # Check basic requirements
-        if not self._check_basic_requirements(market, reasons):
-            passes_filters = False
+        # All markets pass by default (score = 1.0)
+        # Only add reasons if there are active criteria
         
-        # Check percentage spread (if criteria is set)
-        if self.screening_criteria.max_spread_percentage is not None:
-            try:
-                if hasattr(market, 'spread_percentage'):
-                    spread_pct = market.spread_percentage
-                    if spread_pct is not None:
-                        if spread_pct <= self.screening_criteria.max_spread_percentage:
-                            reasons.append(f"Spread percentage within range: {spread_pct:.1%} <= {self.screening_criteria.max_spread_percentage:.1%}")
-                        else:
-                            reasons.append(f"Spread percentage too high: {spread_pct:.1%} > {self.screening_criteria.max_spread_percentage:.1%}")
-                            passes_filters = False
-                    else:
-                        reasons.append("Spread percentage calculated as None")
-                        passes_filters = False
-                else:
-                    logger.warning(f"Market {market.ticker} missing spread_percentage property. Available attributes: {[attr for attr in dir(market) if not attr.startswith('_')]}")
-                    reasons.append("Market object missing spread_percentage property")
-                    passes_filters = False
-            except Exception as e:
-                logger.error(f"Error calculating spread percentage for market {market.ticker}: {e}")
-                reasons.append(f"Error calculating spread percentage: {e}")
-                passes_filters = False
+        # Check if market meets basic requirements (only if criteria are set)
+        if self._has_any_criteria_set():
+            if not self._check_basic_requirements(market, reasons):
+                # This market doesn't meet the criteria, so it gets filtered out
+                return ScreeningResult(
+                    market=market,
+                    score=0.0,  # Filtered out
+                    reasons=reasons,
+                    timestamp=utc_now()
+                )
         
-        # Check spread in cents (if criteria is set)
-        if (self.screening_criteria.min_spread_cents is not None or 
-            self.screening_criteria.max_spread_cents is not None):
-            try:
-                if hasattr(market, 'spread_cents'):
-                    spread_cents = market.spread_cents
-                    if spread_cents is not None:
-                        min_cents = self.screening_criteria.min_spread_cents or 0
-                        max_cents = self.screening_criteria.max_spread_cents or float('inf')
-                        
-                        if min_cents <= spread_cents <= max_cents:
-                            reasons.append(f"Spread cents within range: {spread_cents} cents (min: {min_cents}, max: {max_cents})")
-                        else:
-                            reasons.append(f"Spread cents outside range: {spread_cents} cents (min: {min_cents}, max: {max_cents})")
-                            passes_filters = False
-                    else:
-                        reasons.append("Spread cents calculated as None")
-                        passes_filters = False
-                else:
-                    logger.warning(f"Market {market.ticker} missing spread_cents property")
-                    reasons.append("Market object missing spread_cents property")
-                    passes_filters = False
-            except Exception as e:
-                logger.error(f"Error calculating spread cents for market {market.ticker}: {e}")
-                reasons.append(f"Error calculating spread cents: {e}")
-                passes_filters = False
-        
-        # If no criteria are set, market passes by default
-        if self._no_criteria_set():
-            reasons.append("No screening criteria set - market passes by default")
-            passes_filters = True
+        # If we get here, the market passes (either no criteria or meets all criteria)
+        if self._has_any_criteria_set():
+            reasons.append("Market meets all screening criteria")
+        else:
+            reasons.append("No screening criteria set - all markets shown")
         
         return ScreeningResult(
             market=market,
-            score=1.0 if passes_filters else 0.0,
+            score=1.0,  # Always passes unless explicitly filtered
             reasons=reasons,
             timestamp=utc_now()
         )
@@ -219,20 +183,48 @@ class MarketScreener:
             reasons.append(f"Too far from expiry: {market.days_to_expiry} days")
             return False
         
+        # Check spread in cents (if criteria is set)
+        if (self.screening_criteria.min_spread_cents is not None or 
+            self.screening_criteria.max_spread_cents is not None):
+            try:
+                if hasattr(market, 'spread_cents'):
+                    spread_cents = market.spread_cents
+                    if spread_cents is not None:
+                        min_cents = self.screening_criteria.min_spread_cents or 0
+                        max_cents = self.screening_criteria.max_spread_cents or float('inf')
+                        
+                        if min_cents <= spread_cents <= max_cents:
+                            reasons.append(f"Spread cents within range: {spread_cents} cents (min: {min_cents}, max: {max_cents})")
+                        else:
+                            reasons.append(f"Spread cents outside range: {spread_cents} cents (min: {min_cents}, max: {max_cents})")
+                            return False
+                    else:
+                        reasons.append("Spread cents calculated as None")
+                        return False
+                else:
+                    logger.warning(f"Market {market.ticker} missing spread_cents property")
+                    reasons.append("Market object missing spread_cents property")
+                    return False
+            except Exception as e:
+                logger.error(f"Error calculating spread cents for market {market.ticker}: {e}")
+                reasons.append(f"Error calculating spread cents: {e}")
+                return False
+        
+        # Category filtering is handled at the event level in screen_events method
         return True
     
-    def _no_criteria_set(self) -> bool:
+    def _has_any_criteria_set(self) -> bool:
         """Check if any screening criteria are set."""
-        return all([
-            self.screening_criteria.min_volume is None,
-            self.screening_criteria.min_volume_24h is None,
-            self.screening_criteria.max_spread_percentage is None,
-            self.screening_criteria.max_spread_cents is None,
-            self.screening_criteria.min_spread_cents is None,
-            self.screening_criteria.min_liquidity is None,
-            self.screening_criteria.max_time_to_expiry_days is None,
-            self.screening_criteria.min_open_interest is None,
-            self.screening_criteria.categories is None
+        return any([
+            self.screening_criteria.min_volume is not None,
+            self.screening_criteria.min_volume_24h is not None,
+            self.screening_criteria.max_spread_percentage is not None,
+            self.screening_criteria.max_spread_cents is not None,
+            self.screening_criteria.min_spread_cents is not None,
+            self.screening_criteria.min_liquidity is not None,
+            self.screening_criteria.max_time_to_expiry_days is not None,
+            self.screening_criteria.min_open_interest is not None,
+            (self.screening_criteria.categories is not None and len(self.screening_criteria.categories) > 0)
         ])
     
     def get_passing_markets(self, results: List[ScreeningResult], limit: Optional[int] = None) -> List[ScreeningResult]:

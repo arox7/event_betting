@@ -175,6 +175,47 @@ class Event(KalshiEvent):
     
 
 @dataclass
+class Position:
+    """Portfolio position model."""
+    ticker: str
+    position: int  # Positive = long, Negative = short, 0 = flat
+    market_status: str
+    total_cost: Optional[float] = None  # Total cost in dollars
+    total_value: Optional[float] = None  # Current value in dollars
+    unrealized_pnl: Optional[float] = None  # Unrealized P&L in dollars
+    realized_pnl: Optional[float] = None  # Realized P&L in dollars
+    market_title: Optional[str] = None  # Human-readable market title
+    event_title: Optional[str] = None  # Human-readable event title
+    market_exposure: Optional[float] = None  # Current market exposure in dollars
+    total_traded: Optional[float] = None  # Total traded in dollars
+    fees_paid: Optional[float] = None  # Fees paid in dollars
+    timestamp: datetime = None
+    
+    def __post_init__(self):
+        """Set timestamp if not provided."""
+        if not hasattr(self, 'timestamp') or self.timestamp is None:
+            self.timestamp = utc_now()
+    
+    @property
+    def position_type(self) -> str:
+        """Get position type as string."""
+        if self.position > 0:
+            return "Long"
+        elif self.position < 0:
+            return "Short"
+        else:
+            return "Flat"
+    
+    @property
+    def net_pnl(self) -> Optional[float]:
+        """Get net P&L (realized + unrealized)."""
+        if self.realized_pnl is None and self.unrealized_pnl is None:
+            return None
+        realized = self.realized_pnl or 0.0
+        unrealized = self.unrealized_pnl or 0.0
+        return realized + unrealized
+
+@dataclass
 class ScreeningResult:
     """Result of market screening."""
     market: Market

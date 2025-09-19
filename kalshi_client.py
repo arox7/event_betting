@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
 
-from models import Market, Event
+from models import Market, Event, Position
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,11 @@ class KalshiAPIClient:
         self.base_url = (self.config.KALSHI_DEMO_HOST if self.config.KALSHI_DEMO_MODE 
                         else self.config.KALSHI_API_HOST).rstrip('/')
         self.authenticator = self._initialize_authenticator()
+        
+        # Simple cache for market data to avoid repeated API calls
+        self._market_cache = {}
+        self._cache_timestamp = None
+        self._cache_duration = 300  # 5 minutes cache
         
     def _initialize_authenticator(self):
         """Initialize authenticator if credentials are provided."""
@@ -173,6 +178,192 @@ class KalshiAPIClient:
         except Exception as e:
             logger.error(f"Failed to get balance: {e}")
             return None
+    
+    def get_positions(self) -> List[Position]:
+        """Get all portfolio positions."""
+        try:
+            endpoint = "/trade-api/v2/portfolio/positions"
+            response_data = self._make_request("GET", endpoint)
+            
+            # The API returns both market_positions and event_positions
+            market_positions = response_data.get('market_positions', [])
+            event_positions = response_data.get('event_positions', [])
+            
+            logger.info(f"Retrieved {len(market_positions)} market positions and {len(event_positions)} event positions")
+            if market_positions:
+                logger.debug(f"Sample market position keys: {list(market_positions[0].keys())}")
+            if event_positions:
+                logger.debug(f"Sample event position keys: {list(event_positions[0].keys())}")
+            
+            # Get market titles and statuses for better display (only if we have market positions)
+            market_titles = {}
+            market_statuses = {}
+            if market_positions:
+                market_titles = self._get_market_titles_cache()
+                market_statuses = self._get_market_status_cache()
+            
+            positions = []
+            
+            # Process market positions
+            for pos_data in market_positions:
+                try:
+                    ticker = pos_data.get('ticker', '')
+                    market_title = market_titles.get(ticker, '')
+                    
+                    # Get market status from the cache or API data
+                    market_status = market_statuses.get(ticker, 'active')  # Default to active
+                    if 'market_status' in pos_data:
+                        market_status = pos_data.get('market_status', market_status)
+                    
+                    # Calculate unrealized P&L if we have the data
+                    unrealized_pnl = None
+                    if 'unrealized_pnl_dollars' in pos_data:
+                        unrealized_pnl = float(pos_data.get('unrealized_pnl_dollars', 0.0))
+                    # Note: Removed expensive individual market lookup for unrealized P&L calculation
+                    
+                    position = Position(
+                        ticker=ticker,
+                        position=pos_data.get('position', 0),
+                        market_status=market_status,
+                        total_cost=float(pos_data.get('total_cost_dollars', 0.0)) if pos_data.get('total_cost_dollars') is not None else None,
+                        total_value=float(pos_data.get('market_exposure_dollars', 0.0)) if pos_data.get('market_exposure_dollars') is not None else None,
+                        unrealized_pnl=unrealized_pnl,
+                        realized_pnl=float(pos_data.get('realized_pnl_dollars', 0.0)) if pos_data.get('realized_pnl_dollars') is not None else None,
+                        market_title=market_title,
+                        event_title=None,
+                        market_exposure=float(pos_data.get('market_exposure_dollars', 0.0)) if pos_data.get('market_exposure_dollars') is not None else None,
+                        total_traded=float(pos_data.get('total_traded_dollars', 0.0)) if pos_data.get('total_traded_dollars') is not None else None,
+                        fees_paid=float(pos_data.get('fees_paid_dollars', 0.0)) if pos_data.get('fees_paid_dollars') is not None else None
+                    )
+                    positions.append(position)
+                except Exception as e:
+                    logger.warning(f"Failed to parse market position {pos_data.get('ticker', 'unknown')}: {e}")
+                    continue
+            
+            # Process event positions
+            for pos_data in event_positions:
+                try:
+                    event_ticker = pos_data.get('event_ticker', '')
+                    
+                    # Calculate unrealized P&L if we have the data
+                    unrealized_pnl = None
+                    if 'unrealized_pnl_dollars' in pos_data:
+                        unrealized_pnl = float(pos_data.get('unrealized_pnl_dollars', 0.0))
+                    
+                    position = Position(
+                        ticker=event_ticker,
+                        position=0,  # Event positions don't have individual position size
+                        market_status='active',  # Event positions are typically active
+                        total_cost=float(pos_data.get('total_cost_dollars', 0.0)) if pos_data.get('total_cost_dollars') is not None else None,
+                        total_value=float(pos_data.get('event_exposure_dollars', 0.0)) if pos_data.get('event_exposure_dollars') is not None else None,
+                        unrealized_pnl=unrealized_pnl,
+                        realized_pnl=float(pos_data.get('realized_pnl_dollars', 0.0)) if pos_data.get('realized_pnl_dollars') is not None else None,
+                        market_title=None,
+                        event_title=self._get_event_title(event_ticker),
+                        market_exposure=float(pos_data.get('event_exposure_dollars', 0.0)) if pos_data.get('event_exposure_dollars') is not None else None,
+                        total_traded=None,
+                        fees_paid=float(pos_data.get('fees_paid_dollars', 0.0)) if pos_data.get('fees_paid_dollars') is not None else None
+                    )
+                    positions.append(position)
+                except Exception as e:
+                    logger.warning(f"Failed to parse event position {pos_data.get('event_ticker', 'unknown')}: {e}")
+                    continue
+            
+            return positions
+        except Exception as e:
+            logger.error(f"Failed to get positions: {e}")
+            return []
+    
+    def _get_market_titles_cache(self) -> Dict[str, str]:
+        """Get market titles for better display (cached)."""
+        try:
+            # Check if we have cached data
+            if self._is_cache_valid():
+                return self._market_cache.get('titles', {})
+            
+            # Get fewer markets to build a title cache (use smaller limit for speed)
+            markets = self.get_markets(limit=50)  # Reduced from 100 to 50 for speed
+            titles = {}
+            for market in markets:
+                if hasattr(market, 'ticker') and hasattr(market, 'title'):
+                    titles[market.ticker] = market.title
+            
+            # Cache the results
+            self._market_cache['titles'] = titles
+            self._cache_timestamp = datetime.datetime.now()
+            
+            return titles
+        except Exception as e:
+            logger.warning(f"Failed to get market titles: {e}")
+            return {}
+    
+    def _get_market_status_cache(self) -> Dict[str, str]:
+        """Get market statuses for better display (cached)."""
+        try:
+            # Check if we have cached data
+            if self._is_cache_valid():
+                return self._market_cache.get('statuses', {})
+            
+            # Get fewer markets to build a status cache (use smaller limit for speed)
+            markets = self.get_markets(limit=50)  # Reduced from 100 to 50 for speed
+            statuses = {}
+            for market in markets:
+                if hasattr(market, 'ticker') and hasattr(market, 'status'):
+                    statuses[market.ticker] = market.status
+            
+            # Cache the results
+            self._market_cache['statuses'] = statuses
+            self._cache_timestamp = datetime.datetime.now()
+            
+            return statuses
+        except Exception as e:
+            logger.warning(f"Failed to get market statuses: {e}")
+            return {}
+    
+    def _is_cache_valid(self) -> bool:
+        """Check if the cache is still valid."""
+        if not self._cache_timestamp:
+            return False
+        
+        time_diff = datetime.datetime.now() - self._cache_timestamp
+        return time_diff.total_seconds() < self._cache_duration
+    
+    def _calculate_unrealized_pnl(self, ticker: str, position: int) -> Optional[float]:
+        """Calculate unrealized P&L for a position."""
+        try:
+            if position == 0:
+                return 0.0
+            
+            # Get current market data
+            market = self.get_market_by_ticker(ticker)
+            if not market:
+                return None
+            
+            # Calculate current value based on mid price
+            if hasattr(market, 'mid_price') and market.mid_price:
+                current_value = position * market.mid_price
+                # This is a simplified calculation - in reality you'd need to know the entry price
+                # For now, we'll return None to indicate we can't calculate it accurately
+                return None
+            
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to calculate unrealized P&L for {ticker}: {e}")
+            return None
+    
+    def _get_event_title(self, event_ticker: str) -> str:
+        """Get event title for better display."""
+        try:
+            # Get events to build a title cache (use smaller limit)
+            events = self.get_events(limit=100)  # Get up to 100 events
+            for event in events:
+                if hasattr(event, 'event_ticker') and hasattr(event, 'title'):
+                    if event.event_ticker == event_ticker:
+                        return event.title
+            return ""
+        except Exception as e:
+            logger.warning(f"Failed to get event title for {event_ticker}: {e}")
+            return ""
     
     def health_check(self) -> bool:
         """Check if the API client is working properly."""

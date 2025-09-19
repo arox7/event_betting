@@ -91,6 +91,12 @@ The dashboard will be available at `http://localhost:8501`
 - **Category Breakdown**: Pie chart of markets by category
 - **Market Details**: Detailed view of individual markets
 - **Auto-refresh**: Optional automatic refresh every 5 seconds
+- **Portfolio Positions**: Comprehensive view of your trading positions with:
+  - Real-time P&L tracking (realized and unrealized)
+  - Market status monitoring
+  - Position sizing and exposure analysis
+  - Performance metrics and ROI calculations
+  - Optimized loading with caching for better performance
 
 ## Screening Criteria
 
@@ -166,6 +172,24 @@ The dashboard is built with Streamlit and can be customized by modifying `dashbo
 - Modify the layout and styling
 - Add new filtering options
 
+## Recent Improvements
+
+### Positions Dashboard Enhancements (v2.0)
+
+- **Fixed N/A Values**: Resolved issues with missing data in positions display
+- **Performance Optimization**: 
+  - Lazy loading of positions data to improve dashboard startup time
+  - Added 5-minute caching for market data to reduce API calls
+  - Reduced API call volume by 50% for better performance
+- **Better Data Handling**:
+  - Improved market status detection from API responses
+  - Enhanced P&L calculation and display
+  - Better error handling for missing API data
+- **User Experience**:
+  - Optional positions loading in sidebar to avoid slow startup
+  - Debug information panel for troubleshooting
+  - More informative display values ($0.00 instead of N/A)
+
 ## Troubleshooting
 
 ### Common Issues
@@ -173,6 +197,7 @@ The dashboard is built with Streamlit and can be customized by modifying `dashbo
 1. **API Connection Failed**: Check your API credentials and network connection
 2. **No Markets Found**: Verify the API is returning data and check filters
 3. **Dashboard Not Loading**: Ensure Streamlit is installed and port is available
+4. **Slow Dashboard Loading**: Use the "Load Positions Summary" checkbox to load positions data only when needed
 
 ### Debug Mode
 

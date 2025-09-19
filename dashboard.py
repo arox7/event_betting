@@ -6,13 +6,14 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timezone
+from typing import List
 import time
 import logging
 
 from kalshi_client import KalshiAPIClient
 from market_screener import MarketScreener
 from config import Config
-from models import utc_now
+from models import utc_now, Position
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -50,11 +51,17 @@ class MarketDashboard:
         # Sidebar controls
         self._render_sidebar()
         
-        # Main content
-        if st.session_state.auto_refresh:
-            self._auto_refresh_content()
-        else:
-            self._render_main_content()
+        # Main content tabs
+        tab1, tab2 = st.tabs(["📊 Markets", "💼 Positions"])
+        
+        with tab1:
+            if st.session_state.auto_refresh:
+                self._auto_refresh_content()
+            else:
+                self._render_main_content()
+        
+        with tab2:
+            self._render_positions_tab()
     
     def _render_sidebar(self):
         """Render sidebar controls."""
@@ -71,6 +78,26 @@ class MarketDashboard:
         balance = self.kalshi_client.get_balance()
         if balance is not None:
             st.sidebar.metric("Account Balance", f"${balance:.2f}")
+        
+        # Positions summary (if authenticated) - lazy loaded to avoid slow startup
+        if st.sidebar.checkbox("📊 Load Positions Summary", value=False, help="Check to load positions data (may take a moment)"):
+            with st.sidebar.spinner("Loading positions..."):
+                positions = self.kalshi_client.get_positions()
+                if positions:
+                    # Calculate summary metrics
+                    total_positions = len(positions)
+                    active_positions = len([p for p in positions if p.position != 0])
+                    total_pnl = sum([p.net_pnl or 0.0 for p in positions])
+                    
+                    st.sidebar.metric("Total Positions", total_positions)
+                    st.sidebar.metric("Active Positions", active_positions)
+                    st.sidebar.metric("Net P&L", f"${total_pnl:.2f}")
+                    
+                    # Show positions expander
+                    with st.sidebar.expander("💼 Positions", expanded=False):
+                        self._render_positions_summary(positions)
+                else:
+                    st.sidebar.info("No positions found")
         
         # Refresh controls
         st.sidebar.subheader("Refresh Controls")
@@ -96,13 +123,13 @@ class MarketDashboard:
             st.session_state.screening_criteria = {
                 'min_volume': self.config.MIN_VOLUME,
                 'min_volume_24h': self.config.MIN_VOLUME_24H,
-                'max_spread_percentage': self.config.MAX_SPREAD_PERCENTAGE,
+                'max_spread_percentage': getattr(self.config, 'MAX_SPREAD_PERCENTAGE', None),
                 'max_spread_cents': self.config.MAX_SPREAD_CENTS,
                 'min_spread_cents': self.config.MIN_SPREAD_CENTS,
                 'min_liquidity': self.config.MIN_LIQUIDITY,
                 'max_time_to_expiry_days': self.config.MAX_TIME_TO_EXPIRY_DAYS,
                 'min_open_interest': self.config.MIN_OPEN_INTEREST,
-                'categories': None
+                'categories': []  # Start with empty list instead of None
             }
         
         # Volume & Liquidity Section
@@ -185,28 +212,49 @@ class MarketDashboard:
             available_categories = self._get_available_categories()
             
             if available_categories:
-                # Add "All Categories" option
-                category_options = ["All Categories"] + available_categories
+                # Get current selection from session state
+                current_categories = st.session_state.screening_criteria.get('categories', [])
                 
-                # Get current selection
-                current_category = st.session_state.screening_criteria.get('categories', None)
-                if current_category and len(current_category) == 1:
-                    current_selection = current_category[0]
-                else:
-                    current_selection = "All Categories"
+                # Create columns for buttons
+                col1, col2 = st.columns(2)
                 
-                selected_category = st.selectbox(
-                    "Filter by Category",
-                    options=category_options,
-                    index=category_options.index(current_selection) if current_selection in category_options else 0,
-                    help="Select a category to filter markets (or 'All Categories' for no filtering)"
+                with col1:
+                    if st.button("✅ Select All", help="Select all available categories", use_container_width=True):
+                        st.session_state.screening_criteria['categories'] = available_categories.copy()
+                        st.rerun()
+                
+                with col2:
+                    if st.button("❌ Clear All", help="Deselect all categories", use_container_width=True):
+                        st.session_state.screening_criteria['categories'] = []
+                        st.rerun()
+                
+                # Multiselect for categories
+                selected_categories = st.multiselect(
+                    "Select Categories",
+                    options=available_categories,
+                    default=current_categories,
+                    help="Select one or more categories to filter markets. Leave empty to include all categories."
                 )
                 
-                # Convert selection to criteria format
-                if selected_category == "All Categories":
-                    selected_categories = None
+                # Show selection summary
+                if selected_categories:
+                    if len(selected_categories) == len(available_categories):
+                        st.success(f"✅ All {len(available_categories)} categories selected")
+                    else:
+                        st.info(f"📋 {len(selected_categories)} of {len(available_categories)} categories selected")
                 else:
-                    selected_categories = [selected_category]
+                    st.warning("⚠️ No categories selected - will include all categories")
+                
+                # Convert to criteria format
+                # If no categories selected, use None (no filtering)
+                # If all categories selected, use None (no filtering needed)
+                # Otherwise, use the selected categories list
+                if not selected_categories:
+                    selected_categories = None  # No filtering - show all categories
+                elif len(selected_categories) == len(available_categories):
+                    selected_categories = None  # All categories selected - no filtering needed
+                # Otherwise, selected_categories remains as the list of selected categories
+                    
             else:
                 st.info("No categories available. Refresh markets to see categories.")
                 selected_categories = None
@@ -370,13 +418,13 @@ class MarketDashboard:
             st.metric("Total Markets", summary['total_markets'])
         
         with col2:
-            st.metric("Passing Markets", summary['passing_markets'])
+            st.metric("Filtered Markets", summary['passing_markets'])
         
         with col3:
-            st.metric("Pass Rate", f"{summary['pass_rate']:.1%}")
+            st.metric("Filter Rate", f"{summary['pass_rate']:.1%}")
         
         with col4:
-            st.metric("Failing Markets", summary['total_markets'] - summary['passing_markets'])
+            st.metric("Hidden Markets", summary['total_markets'] - summary['passing_markets'])
         
         # Current criteria summary
         if 'screening_criteria' in st.session_state:
@@ -422,12 +470,12 @@ class MarketDashboard:
         # Filter options
         col1, col2 = st.columns(2)
         with col1:
-            show_only_passing = st.checkbox("Show only passing markets", value=True)
+            show_only_filtered = st.checkbox("Show only filtered markets", value=True)
         with col2:
             search_term = st.text_input("🔍 Search events", placeholder="Search by event title...", help="Filter events by title")
         
         # Filter results
-        if show_only_passing:
+        if show_only_filtered:
             filtered_results = [r for r in top_opportunities if r.score == 1.0]
         else:
             filtered_results = top_opportunities
@@ -468,7 +516,7 @@ class MarketDashboard:
                 'Market Title': market.title[:40] + "..." if len(market.title) > 40 else market.title,
                 'Category': event.category if event else "N/A",
                 'Score': f"{result.score:.2f}",
-                'Status': "✅ Pass" if result.score > 0 else "❌ Fail",
+                'Status': "✅ Show" if result.score > 0 else "❌ Hidden",
                 'Total Volume': f"{market.volume:,}" if market.volume else "0",
                 '24h Volume': f"{volume_24h:,}" if volume_24h else "0",
                 'Open Interest': f"{market.open_interest:,}" if market.open_interest else "0",
@@ -556,35 +604,35 @@ class MarketDashboard:
                         st.rerun()
         
         # Summary stats for filtered results
-        passing_count = len([r for r in filtered_results if r.score == 1.0])
+        visible_count = len([r for r in filtered_results if r.score == 1.0])
         
         # Build caption with filter info
-        caption_parts = [f"Showing {len(filtered_results)} markets ({passing_count} passing, {len(filtered_results) - passing_count} failing)"]
+        caption_parts = [f"Showing {len(filtered_results)} markets ({visible_count} visible, {len(filtered_results) - visible_count} hidden)"]
         
         if search_term:
             caption_parts.append(f"filtered by '{search_term}'")
         
-        if show_only_passing:
-            caption_parts.append("(passing only)")
+        if show_only_filtered:
+            caption_parts.append("(visible only)")
         
         st.caption(" | ".join(caption_parts))
     
     def _render_score_distribution(self):
-        """Render pass/fail distribution chart."""
-        st.subheader("📊 Pass/Fail Distribution")
+        """Render visible/hidden distribution chart."""
+        st.subheader("📊 Visible vs Hidden Markets")
         
         if not st.session_state.screening_results:
             st.info("No data available")
             return
         
-        passing = len([r for r in st.session_state.screening_results if r.score == 1.0])
-        failing = len([r for r in st.session_state.screening_results if r.score == 0.0])
+        visible = len([r for r in st.session_state.screening_results if r.score == 1.0])
+        hidden = len([r for r in st.session_state.screening_results if r.score == 0.0])
         
         fig = px.pie(
-            values=[passing, failing],
-            names=['Passing', 'Failing'],
-            title="Markets Passing vs Failing Criteria",
-            color_discrete_map={'Passing': 'green', 'Failing': 'red'}
+            values=[visible, hidden],
+            names=['Visible', 'Hidden'],
+            title="Markets Visible vs Hidden by Filter",
+            color_discrete_map={'Visible': 'green', 'Hidden': 'red'}
         )
         
         st.plotly_chart(fig, use_container_width=True)
@@ -734,6 +782,172 @@ class MarketDashboard:
         except Exception as e:
             st.error(f"Failed to refresh events: {e}")
             logger.error(f"Failed to refresh events: {e}")
+    
+    def _render_positions_summary(self, positions: List[Position]):
+        """Render positions summary in sidebar."""
+        if not positions:
+            st.info("No positions found")
+            return
+        
+        # Show top positions by absolute value
+        sorted_positions = sorted(positions, key=lambda p: abs(p.position), reverse=True)
+        
+        for position in sorted_positions[:5]:  # Show top 5
+            pnl = position.net_pnl or 0.0
+            pnl_color = "green" if pnl > 0 else "red" if pnl < 0 else "gray"
+            
+            st.markdown(f"**{position.ticker[:15]}...**")
+            st.markdown(f"Position: {position.position} ({position.position_type})")
+            st.markdown(f"P&L: :{pnl_color}[${pnl:.2f}]")
+            st.markdown("---")
+    
+    def _render_positions_tab(self):
+        """Render the positions tab."""
+        st.header("💼 Portfolio Positions")
+        
+        # Get positions
+        positions = self.kalshi_client.get_positions()
+        
+        if not positions:
+            st.info("No positions found. You're authenticated, but you don't have any open positions in your portfolio.")
+            return
+        
+        # Summary metrics
+        total_positions = len(positions)
+        active_positions = len([p for p in positions if p.position != 0])
+        long_positions = len([p for p in positions if p.position > 0])
+        short_positions = len([p for p in positions if p.position < 0])
+        total_pnl = sum([p.net_pnl or 0.0 for p in positions])
+        total_value = sum([p.total_value or 0.0 for p in positions])
+        total_cost = sum([p.total_cost or 0.0 for p in positions])
+        
+        # Display metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total Positions", total_positions)
+        with col2:
+            st.metric("Active Positions", active_positions)
+        with col3:
+            st.metric("Long/Short", f"{long_positions}/{short_positions}")
+        with col4:
+            pnl_color = "normal" if total_pnl >= 0 else "inverse"
+            st.metric("Net P&L", f"${total_pnl:.2f}", delta=None)
+        
+        # Additional metrics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Value", f"${total_value:.2f}")
+        with col2:
+            st.metric("Total Cost", f"${total_cost:.2f}")
+        with col3:
+            if total_cost > 0:
+                roi = ((total_value - total_cost) / total_cost) * 100
+                st.metric("ROI", f"{roi:.1f}%")
+        
+        st.markdown("---")
+        
+        # Positions table
+        st.subheader("📋 Position Details")
+        
+        # Filter options
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            show_only_active = st.checkbox("Show only active positions", value=True)
+        with col2:
+            sort_by = st.selectbox("Sort by", ["Position Size", "P&L", "Ticker", "Value"])
+        with col3:
+            search_ticker = st.text_input("🔍 Search ticker", placeholder="Filter by ticker...")
+        
+        # Filter and sort positions
+        filtered_positions = positions.copy()
+        
+        if show_only_active:
+            filtered_positions = [p for p in filtered_positions if p.position != 0]
+        
+        if search_ticker:
+            filtered_positions = [p for p in filtered_positions if search_ticker.lower() in p.ticker.lower()]
+        
+        # Sort positions
+        if sort_by == "Position Size":
+            filtered_positions.sort(key=lambda p: abs(p.position), reverse=True)
+        elif sort_by == "P&L":
+            filtered_positions.sort(key=lambda p: p.net_pnl or 0.0, reverse=True)
+        elif sort_by == "Ticker":
+            filtered_positions.sort(key=lambda p: p.ticker)
+        elif sort_by == "Value":
+            filtered_positions.sort(key=lambda p: p.total_value or 0.0, reverse=True)
+        
+        if not filtered_positions:
+            st.info("No positions match the current filters.")
+            return
+        
+        # Create positions DataFrame
+        positions_data = []
+        for pos in filtered_positions:
+            # Use market title if available, otherwise use ticker
+            display_name = pos.market_title or pos.event_title or pos.ticker
+            
+            positions_data.append({
+                'Market/Event': display_name[:50] + "..." if len(display_name) > 50 else display_name,
+                'Ticker': pos.ticker,
+                'Position': pos.position,
+                'Type': pos.position_type,
+                'Status': pos.market_status or "Unknown",
+                'Total Value': f"${pos.total_value:.2f}" if pos.total_value is not None else "$0.00",
+                'Total Cost': f"${pos.total_cost:.2f}" if pos.total_cost is not None else "$0.00",
+                'Market Exposure': f"${pos.market_exposure:.2f}" if pos.market_exposure is not None else "$0.00",
+                'Realized P&L': f"${pos.realized_pnl:.2f}" if pos.realized_pnl is not None else "$0.00",
+                'Unrealized P&L': f"${pos.unrealized_pnl:.2f}" if pos.unrealized_pnl is not None else "Calculating...",
+                'Net P&L': f"${pos.net_pnl:.2f}" if pos.net_pnl is not None else "$0.00",
+                'Fees Paid': f"${pos.fees_paid:.2f}" if pos.fees_paid is not None else "$0.00"
+            })
+        
+        df = pd.DataFrame(positions_data)
+        
+        # Display table
+        st.data_editor(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            disabled=True,
+            column_config={
+                "Position": st.column_config.NumberColumn(
+                    "Position",
+                    help="Number of shares (positive=long, negative=short)"
+                ),
+                "Type": st.column_config.TextColumn(
+                    "Type",
+                    help="Position type"
+                ),
+                "Net P&L": st.column_config.TextColumn(
+                    "Net P&L",
+                    help="Total profit/loss (realized + unrealized)"
+                )
+            }
+        )
+        
+        st.caption(f"Showing {len(filtered_positions)} of {len(positions)} positions")
+        
+        # Debug information (only show if there are issues)
+        if st.checkbox("🔧 Show Debug Info", value=False):
+            st.subheader("Debug Information")
+            if positions:
+                sample_pos = positions[0]
+                st.json({
+                    "Sample Position Data": {
+                        "ticker": sample_pos.ticker,
+                        "position": sample_pos.position,
+                        "market_status": sample_pos.market_status,
+                        "total_cost": sample_pos.total_cost,
+                        "total_value": sample_pos.total_value,
+                        "unrealized_pnl": sample_pos.unrealized_pnl,
+                        "realized_pnl": sample_pos.realized_pnl,
+                        "net_pnl": sample_pos.net_pnl,
+                        "market_exposure": sample_pos.market_exposure,
+                        "fees_paid": sample_pos.fees_paid
+                    }
+                })
 
 def main():
     """Main function to run the dashboard."""
