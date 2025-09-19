@@ -1,10 +1,11 @@
-# Setup Guide for Kalshi Market Making Bot
+# Setup Guide for Kalshi Market Analysis Dashboard
 
 ## Prerequisites
 
 1. **Python 3.8+** installed on your system
 2. **Kalshi Account** with API access
 3. **API Credentials** from Kalshi
+4. **Gemini API Key** (optional, for AI features)
 
 ## Step 1: Get Kalshi API Credentials
 
@@ -30,6 +31,9 @@ KALSHI_API_HOST=https://api.elections.kalshi.com/trade-api/v2
 # Dashboard Configuration
 DASHBOARD_PORT=8501
 DASHBOARD_HOST=localhost
+
+# Optional: Gemini AI Configuration (for AI features)
+GEMINI_API_KEY=your-gemini-api-key-here
 ```
 
 ## Step 3: Save Your Private Key
@@ -80,20 +84,23 @@ This will:
 - Fetch sample markets
 - Run screening test
 
-## Step 7: Run the Bot
+## Step 7: Run the Dashboard
 
-### Option 1: Use the startup script
+### Option 1: Use the startup script (recommended)
 ```bash
-./run_bot.sh
+./run_dashboard.sh
 ```
 
 ### Option 2: Run directly
 ```bash
-# Run market screening bot
-python main.py --mode bot
-
 # Run dashboard
-python main.py --mode dashboard
+python main.py
+
+# Or with custom port
+python main.py --port 8502
+
+# Or with Streamlit directly
+streamlit run dashboard.py
 ```
 
 ## Troubleshooting
@@ -119,6 +126,11 @@ python main.py --mode dashboard
    - Check if Kalshi API is accessible
    - Try switching between demo and production
 
+5. **"AI features not working"**
+   - Check if GEMINI_API_KEY is set in your .env file
+   - Verify the API key is valid
+   - Check your internet connection
+
 ### Demo vs Production
 
 - **Demo**: Safe testing environment with fake money
@@ -126,19 +138,21 @@ python main.py --mode dashboard
 
 ### API Rate Limits
 
-Kalshi has rate limits on API requests. The bot is designed to respect these limits, but if you encounter rate limiting errors, you may need to reduce the frequency of requests.
+Kalshi has rate limits on API requests. The dashboard fetches data on-demand rather than continuously, which helps avoid rate limiting issues.
 
 ## Security Notes
 
 - Never commit your `.env` file or private key to version control
-- Keep your private key secure and don't share it
+- Keep your private key and API keys secure and don't share them
 - Use demo mode for testing and development
-- Only use production mode when you're ready to trade with real money
+- Only use production mode when analyzing real markets
+- Keep your Gemini API key secure as well
 
 ## Getting Help
 
 If you encounter issues:
-1. Check the logs in `market_bot.log`
-2. Run the test setup script to diagnose problems
+1. Check the console output for error messages
+2. Run the test setup script to diagnose problems: `python test_setup.py`
 3. Verify your API credentials are correct
 4. Check Kalshi's API documentation for any changes
+5. For AI features, verify your Gemini API key is working

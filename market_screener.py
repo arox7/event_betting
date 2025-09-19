@@ -30,23 +30,10 @@ class MarketScreener:
             max_spread_cents=self.config.MAX_SPREAD_CENTS,
             min_spread_cents=self.config.MIN_SPREAD_CENTS,
             min_liquidity=self.config.MIN_LIQUIDITY,
-            max_time_to_expiry_days=self.config.MAX_TIME_TO_EXPIRY_DAYS,
+            max_time_to_close_days=self.config.MAX_TIME_TO_CLOSE_DAYS,
             min_open_interest=self.config.MIN_OPEN_INTEREST,
             categories=None  # No category filtering by default
         )
-    
-    def update_criteria(self, **kwargs) -> None:
-        """
-        Update screening criteria with new values.
-        
-        Args:
-            **kwargs: Criteria to update (e.g., min_volume=2000, max_spread_percentage=0.15)
-        """
-        for key, value in kwargs.items():
-            if hasattr(self.screening_criteria, key):
-                setattr(self.screening_criteria, key, value)
-            else:
-                logger.warning(f"Unknown criteria: {key}")
     
     def get_current_criteria(self) -> ScreeningCriteria:
         """Get current screening criteria."""
@@ -96,9 +83,6 @@ class MarketScreener:
             for result in market_results:
                 result.event = event
                 all_results.append(result)
-        
-        # Sort by score (highest first)
-        all_results.sort(key=lambda x: x.score, reverse=True)
         
         # Sort by score (highest first)
         all_results.sort(key=lambda x: x.score, reverse=True)
@@ -214,9 +198,9 @@ class MarketScreener:
                 return False
         
         # Must be within time limit
-        if (self.screening_criteria.max_time_to_expiry_days is not None and 
-            market.days_to_expiry > self.screening_criteria.max_time_to_expiry_days):
-            reasons.append(f"Too far from expiry: {market.days_to_expiry} days")
+        if (self.screening_criteria.max_time_to_close_days is not None and 
+            market.days_to_close > self.screening_criteria.max_time_to_close_days):
+            reasons.append(f"Too far from close: {market.days_to_close} days")
             return False
         
         return True
@@ -230,7 +214,7 @@ class MarketScreener:
             self.screening_criteria.max_spread_cents is None,
             self.screening_criteria.min_spread_cents is None,
             self.screening_criteria.min_liquidity is None,
-            self.screening_criteria.max_time_to_expiry_days is None,
+            self.screening_criteria.max_time_to_close_days is None,
             self.screening_criteria.min_open_interest is None,
             self.screening_criteria.categories is None
         ])

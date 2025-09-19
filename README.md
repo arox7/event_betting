@@ -1,14 +1,14 @@
-# Kalshi Market Making Bot
+# Kalshi Market Analysis Dashboard
 
-A Python-based market making bot for Kalshi that screens markets for profitable trading opportunities and displays them on a real-time dashboard.
+A Python-based dashboard for analyzing Kalshi prediction markets with AI-powered screening capabilities and interactive visualizations.
 
 ## Features
 
-- **Real-time Market Screening**: Screens Kalshi markets every second for profitable characteristics
-- **Interactive Dashboard**: Streamlit-based web interface for visualizing opportunities
+- **Interactive Dashboard**: Streamlit-based web interface for market analysis
+- **AI-Powered Screening**: Natural language queries using Gemini AI for custom market filtering
 - **Configurable Criteria**: Customizable screening parameters (volume, spread, liquidity, etc.)
 - **Market Analysis**: Detailed scoring system based on multiple factors
-- **Historical Tracking**: Collects and stores market data over time
+- **Real-time Data**: Fetch and analyze current market data on demand
 - **API Integration**: Full integration with Kalshi's Python SDK
 
 ## Installation
@@ -46,117 +46,129 @@ KALSHI_API_HOST=https://api.elections.kalshi.com/trade-api/v2
 # Dashboard Configuration
 DASHBOARD_PORT=8501
 DASHBOARD_HOST=localhost
+
+# Optional: Gemini AI Configuration
+GEMINI_API_KEY=your-gemini-api-key-here
 ```
 
-**Important**: This bot now uses proper Kalshi API authentication following the [official documentation](https://docs.kalshi.com/getting_started/api_keys). You need to:
+**Important**: This dashboard uses proper Kalshi API authentication following the [official documentation](https://docs.kalshi.com/getting_started/api_keys). You need to:
 1. Generate API credentials from your Kalshi account
 2. Save your private key as a `.pem` file
 3. Configure the environment variables
+4. (Optional) Get a Gemini API key for AI features
 
 ## Usage
-
-### Running the Bot
-
-Start the market screening bot:
-```bash
-python main.py --mode bot
-```
-
-This will:
-- Connect to the Kalshi API
-- Start screening markets every second
-- Log statistics and opportunities
-- Store historical data
 
 ### Running the Dashboard
 
 Start the web dashboard:
 ```bash
-python main.py --mode dashboard
+python main.py
 ```
 
-Or run directly:
+Or with a custom port:
+```bash
+python main.py --port 8502
+```
+
+Use the startup script (recommended):
+```bash
+./run_dashboard.sh
+```
+
+Or run directly with Streamlit:
 ```bash
 streamlit run dashboard.py
 ```
 
-The dashboard will be available at `http://localhost:8501`
+The dashboard will be available at `http://localhost:8501` (or your specified port)
 
 ## Dashboard Features
 
-- **Real-time Market Data**: Live updates of market opportunities
-- **Summary Metrics**: Total markets, profitable opportunities, success rate
-- **Top Opportunities Table**: Ranked list of best trading opportunities
-- **Score Distribution**: Histogram of market scores
-- **Category Breakdown**: Pie chart of markets by category
-- **Market Details**: Detailed view of individual markets
-- **Auto-refresh**: Optional automatic refresh every 5 seconds
+- **Market Data Analysis**: Fetch and analyze current market data on demand
+- **AI-Powered Screening**: Use natural language to create custom market filters
+- **Summary Metrics**: Total markets, opportunities, and filtering statistics
+- **Interactive Tables**: Sortable and filterable market data
+- **Visual Analytics**: Charts and graphs for market distribution and trends
+- **Market Details**: Detailed view of individual markets with full information
+- **Custom Filtering**: Advanced filtering options for market characteristics
 
-## Screening Criteria
+## Analysis Criteria
 
-The bot screens markets based on:
+The dashboard can filter and analyze markets based on:
 
-- **Volume**: Minimum trading volume requirement
-- **Spread**: Maximum bid-ask spread percentage
-- **Liquidity**: Minimum liquidity requirements
-- **Time to Expiry**: Maximum days until market expiry
-- **Category**: Focus on specific market categories (politics, economics)
-- **Price Range**: Optimal volatility ranges for market making
+- **Volume**: Trading volume requirements (total and 24h)
+- **Spread**: Bid-ask spread analysis (percentage and cents)
+- **Liquidity**: Market liquidity requirements
+- **Time to Close**: Days until market close
+- **Category**: Market categories (politics, economics, etc.)
+- **Price Range**: Market price ranges and volatility
+- **AI Queries**: Natural language filtering with Gemini AI
 
-## Scoring System
+## AI-Powered Analysis
 
-Markets are scored based on:
+The dashboard includes advanced AI features powered by Google Gemini:
 
-1. **Volume Score** (0-0.2): Higher volume = higher score
-2. **Spread Score** (0-0.3): Tighter spreads = higher score
-3. **Liquidity Score** (0-0.2): Higher liquidity = higher score
-4. **Time Score** (0-0.2): Optimal time to expiry = higher score
-5. **Category Score** (0-0.1): Preferred categories = higher score
-6. **Volatility Score** (0-0.1): Good volatility range = higher score
+- **Natural Language Queries**: Ask questions like "Show me markets closing soon with high volume" or "Find undervalued political markets"
+- **Custom Screening Functions**: AI generates Python code to filter markets based on your specific criteria
+- **Interactive Code Editing**: Review and modify AI-generated screening logic
+- **Smart Market Insights**: Get AI-powered analysis of market trends and opportunities
 
-Total possible score: 1.0
+### Example AI Queries
+- "Markets with tight spreads and high liquidity"
+- "Election markets closing in the next 30 days"
+- "Undervalued markets with recent volume spikes"
+- "Markets where the probability seems disconnected from fundamentals"
 
 ## Project Structure
 
 ```
 event_betting/
-├── main.py                 # Main application entry point
+├── main.py                 # Main application entry point (dashboard launcher)
 ├── config.py              # Configuration settings
 ├── models.py              # Data models and classes
 ├── kalshi_client.py       # Kalshi API client wrapper
 ├── market_screener.py     # Market screening logic
-├── scheduler.py           # Task scheduler
-├── dashboard.py           # Streamlit dashboard
+├── gemini_screener.py     # AI-powered screening with Gemini
+├── dashboard.py           # Streamlit dashboard (main interface)
 ├── requirements.txt       # Python dependencies
+├── test_event.py          # Event testing utilities
+├── test_market.py         # Market testing utilities
+├── test_setup.py          # Setup validation script
+├── run_dashboard.sh       # Quick start script
 └── README.md             # This file
 ```
 
 ## API Requirements
 
-To use the full functionality, you'll need:
+To use the dashboard, you'll need:
 
+### Required
 1. **Kalshi API Key ID**: Get from your Kalshi account profile
 2. **RSA Private Key**: Generated by Kalshi (saved as .pem file)
-3. **Account Balance**: For trading (optional for screening only)
 
-The bot now uses proper RSA-PSS signature authentication as specified in the [Kalshi API documentation](https://docs.kalshi.com/getting_started/api_keys). This provides better security and follows Kalshi's recommended authentication method.
+### Optional
+3. **Gemini API Key**: For AI-powered features (get from [Google AI Studio](https://makersuite.google.com/app/apikey))
+
+The application uses proper RSA-PSS signature authentication as specified in the [Kalshi API documentation](https://docs.kalshi.com/getting_started/api_keys). This provides better security and follows Kalshi's recommended authentication method.
 
 ## Logging
 
-The bot logs to both console and file (`market_bot.log`):
+The application logs to console:
 
-- Market screening results
+- Dashboard startup and status
 - API connection status
 - Error messages
-- Performance statistics
+- User interactions
 
 ## Development
 
-### Adding New Screening Criteria
+### Adding New Analysis Features
 
 1. Update `ScreeningCriteria` in `models.py`
-2. Add scoring logic in `market_screener.py`
-3. Update dashboard to display new criteria
+2. Add filtering logic in `market_screener.py`
+3. Update dashboard UI in `dashboard.py`
+4. Add AI prompts in `gemini_screener.py` for natural language support
 
 ### Customizing the Dashboard
 
@@ -164,22 +176,25 @@ The dashboard is built with Streamlit and can be customized by modifying `dashbo
 
 - Add new charts and visualizations
 - Modify the layout and styling
-- Add new filtering options
+- Add new filtering and analysis options
+- Integrate additional AI capabilities
 
 ## Troubleshooting
 
 ### Common Issues
 
 1. **API Connection Failed**: Check your API credentials and network connection
-2. **No Markets Found**: Verify the API is returning data and check filters
+2. **No Markets Found**: Verify the API is returning data and check filters  
 3. **Dashboard Not Loading**: Ensure Streamlit is installed and port is available
+4. **AI Features Not Working**: Verify your Gemini API key is set in the `.env` file
+5. **Permission Errors**: Make sure the startup script is executable: `chmod +x run_dashboard.sh`
 
 ### Debug Mode
 
-Enable debug logging by modifying the logging level in `main.py`:
+Enable debug logging by setting the environment variable:
 
-```python
-logging.basicConfig(level=logging.DEBUG)
+```bash
+export PYTHONPATH=. && python -c "import logging; logging.basicConfig(level=logging.DEBUG)" && python main.py
 ```
 
 ## License
@@ -188,4 +203,4 @@ This project is for educational and research purposes. Please ensure compliance 
 
 ## Disclaimer
 
-This software is provided as-is for educational purposes. Trading involves risk, and past performance does not guarantee future results. Always do your own research and consider consulting with financial professionals before making trading decisions.
+This software is provided as-is for educational and analysis purposes. This is a market analysis tool, not a trading bot. Any trading decisions should be made carefully with proper research and risk management. Always comply with applicable regulations and platform terms of service.

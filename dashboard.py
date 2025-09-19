@@ -6,11 +6,11 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timezone
-import time
 import logging
 
 from kalshi_client import KalshiAPIClient
 from market_screener import MarketScreener
+from gemini_screener import GeminiScreener
 from config import Config
 from models import utc_now
 
@@ -26,14 +26,18 @@ class MarketDashboard:
         self.config = Config()
         self.kalshi_client = KalshiAPIClient(self.config)
         self.screener = MarketScreener(self.kalshi_client, self.config)
+        self.gemini_screener = GeminiScreener(self.config)
         
         # Initialize session state
-        if 'screening_results' not in st.session_state:
-            st.session_state.screening_results = []
-        if 'last_update' not in st.session_state:
-            st.session_state.last_update = None
-        if 'auto_refresh' not in st.session_state:
-            st.session_state.auto_refresh = False
+        session_defaults = {
+            'screening_results': [],
+            'last_update': None,
+            'initial_load_complete': False
+        }
+        
+        for key, default_value in session_defaults.items():
+            if key not in st.session_state:
+                st.session_state[key] = default_value
     
     def run(self):
         """Run the dashboard."""
@@ -50,11 +54,49 @@ class MarketDashboard:
         # Sidebar controls
         self._render_sidebar()
         
-        # Main content
-        if st.session_state.auto_refresh:
-            self._auto_refresh_content()
-        else:
-            self._render_main_content()
+        # Auto-refresh on first load
+        if not st.session_state.initial_load_complete:
+            self._initial_data_load()
+        
+        # AI Components at the top
+        self._render_ai_components_top()
+        
+        # Main content (full width)
+        self._render_main_content()
+    
+    def _initial_data_load(self):
+        """Perform initial data load when dashboard first starts."""
+        try:
+            # Show loading message in a toast/temporary area
+            with st.spinner("🔄 Loading market data..."):
+                # Refresh markets data
+                self._refresh_markets()
+            
+            # Mark initial load as complete
+            st.session_state.initial_load_complete = True
+            
+            # Show brief success message if data was loaded
+            if st.session_state.screening_results:
+                st.success(f"✅ Loaded {len(st.session_state.screening_results)} markets successfully!")
+            
+        except Exception as e:
+            st.error(f"❌ Failed to load initial data: {e}")
+            st.session_state.initial_load_complete = True  # Mark as complete even on error to avoid infinite retries
+    
+    def _render_ai_components_top(self):
+        """Render AI components at the top of the interface."""
+        st.header("🤖 AI-Powered Tools")
+        
+        # Two columns for the AI tools
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            self._render_bespoke_screening_compact()
+        
+        with col2:
+            self._render_ai_quick_actions()
+        
+        st.divider()
     
     def _render_sidebar(self):
         """Render sidebar controls."""
@@ -77,11 +119,6 @@ class MarketDashboard:
         if st.sidebar.button("🔄 Refresh Markets", type="primary"):
             self._refresh_markets()
         
-        st.session_state.auto_refresh = st.sidebar.checkbox(
-            "Auto Refresh (5s)", 
-            value=st.session_state.auto_refresh
-        )
-        
         st.sidebar.caption("💡 Tip: Click 'Refresh Markets' after changing criteria to see updated results")
         
         # Screening criteria with organized sections
@@ -90,6 +127,12 @@ class MarketDashboard:
     def _render_screening_criteria(self):
         """Render comprehensive screening criteria with organized sections."""
         st.sidebar.subheader("🎯 Screening Criteria")
+        
+        # Show warning if AI screening is active
+        screening_mode = st.session_state.get('screening_mode', 'standard')
+        if screening_mode in ['bespoke', 'bespoke_custom']:
+            st.sidebar.warning("⚠️ **AI Screening Active** - Manual criteria below are not currently being used. AI is using dynamic criteria based on your query.")
+            st.sidebar.info("💡 Use 'Return to Standard Screening' to use manual criteria again.")
         
         # Initialize session state for criteria if not exists
         if 'screening_criteria' not in st.session_state:
@@ -100,7 +143,7 @@ class MarketDashboard:
                 'max_spread_cents': self.config.MAX_SPREAD_CENTS,
                 'min_spread_cents': self.config.MIN_SPREAD_CENTS,
                 'min_liquidity': self.config.MIN_LIQUIDITY,
-                'max_time_to_expiry_days': self.config.MAX_TIME_TO_EXPIRY_DAYS,
+                'max_time_to_close_days': self.config.MAX_TIME_TO_CLOSE_DAYS,
                 'min_open_interest': self.config.MIN_OPEN_INTEREST,
                 'categories': None
             }
@@ -171,12 +214,12 @@ class MarketDashboard:
                     help="Maximum spread in cents"
                 )
         
-        # Time & Expiry Section
-        with st.sidebar.expander("⏰ Time & Expiry", expanded=True):
+        # Time & Close Section
+        with st.sidebar.expander("⏰ Time & Close", expanded=True):
             max_days = st.number_input(
-                "Max Days to Expiry", 
+                "Max Days to Close", 
                 step=1,
-                help="Maximum days until market expiry"
+                help="Maximum days until market close"
             )
         
         # Category Filtering Section
@@ -219,7 +262,7 @@ class MarketDashboard:
             'max_spread_cents': max_spread_cents,
             'min_spread_cents': min_spread_cents,
             'min_liquidity': min_liquidity,
-            'max_time_to_expiry_days': max_days,
+            'max_time_to_close_days': max_days,
             'min_open_interest': min_open_interest,
             'categories': selected_categories
         })
@@ -227,6 +270,11 @@ class MarketDashboard:
         # Apply criteria button
         if st.sidebar.button("🔄 Apply Criteria & Refresh", type="primary", use_container_width=True):
             self._apply_screening_criteria()
+        
+        # Return to standard screening button (if in bespoke mode)
+        if st.session_state.get('screening_mode', 'standard') in ['bespoke', 'bespoke_custom']:
+            if st.sidebar.button("🔙 Return to Standard Screening", use_container_width=True):
+                self._return_to_standard_screening()
         
         # Export/Import criteria
         with st.sidebar.expander("💾 Save/Load Criteria", expanded=False):
@@ -262,7 +310,7 @@ class MarketDashboard:
             max_spread_cents=criteria['max_spread_cents'],
             min_spread_cents=criteria['min_spread_cents'],
             min_liquidity=criteria['min_liquidity'],
-            max_time_to_expiry_days=criteria['max_time_to_expiry_days'],
+            max_time_to_close_days=criteria['max_time_to_close_days'],
             min_open_interest=criteria['min_open_interest'],
             categories=criteria['categories']
         )
@@ -309,7 +357,7 @@ class MarketDashboard:
                 required_fields = [
                     'min_volume', 'min_volume_24h', 'max_spread_percentage',
                     'max_spread_cents', 'min_spread_cents', 'min_liquidity',
-                    'max_time_to_expiry_days', 'min_open_interest'
+                    'max_time_to_close_days', 'min_open_interest'
                 ]
                 
                 if all(field in criteria for field in required_fields):
@@ -323,6 +371,311 @@ class MarketDashboard:
                 st.sidebar.error("❌ Invalid JSON format.")
             except Exception as e:
                 st.sidebar.error(f"❌ Error loading criteria: {e}")
+    
+    def _render_bespoke_screening_compact(self):
+        """Render compact bespoke screening section at the top."""
+        st.subheader("🔍 AI Market Finder")
+        
+        if not self.gemini_screener.is_available():
+            st.warning("⚠️ Gemini API not configured. Set GEMINI_API_KEY in your .env file.")
+            return
+        
+        # Text input for user query
+        user_query = st.text_area(
+            "Describe what markets you're looking for:",
+            placeholder="e.g., find all markets closing in the next hour with volume > 5000",
+            height=80,
+            key="bespoke_query_top"
+        )
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🔍 Generate & Run", type="primary", disabled=not user_query.strip(), key="run_top"):
+                self._run_bespoke_screening(user_query.strip())
+        
+        with col2:
+            if st.button("👁️ Preview Code", disabled=not user_query.strip(), key="preview_top"):
+                self._preview_bespoke_code(user_query.strip())
+        
+        with col3:
+            with st.expander("💡 Examples"):
+                st.markdown("""
+                - "find markets closing in the next 30 minutes"
+                - "show me markets with volume > 10,000 and spread < 3 cents"
+                - "markets about elections with high volatility"
+                - "find undervalued markets trading below 20 cents"
+                """)
+        
+        # Show generated code if available
+        if 'bespoke_code' in st.session_state and st.session_state.bespoke_code:
+            with st.expander("📝 Generated Code", expanded=False):
+                st.code(st.session_state.bespoke_code, language="python")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✏️ Edit & Run", key="edit_bespoke_top"):
+                        st.session_state.show_code_editor = True
+                with col2:
+                    if st.button("🗑️ Clear Code", key="clear_code_top"):
+                        if 'bespoke_code' in st.session_state:
+                            del st.session_state.bespoke_code
+                        st.rerun()
+        
+        # Code editor for manual editing
+        if st.session_state.get('show_code_editor', False):
+            st.markdown("**Edit the code:**")
+            edited_code = st.text_area(
+                "Python code:",
+                value=st.session_state.get('bespoke_code', ''),
+                height=200,
+                key="edited_bespoke_code_top"
+            )
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("▶️ Run Edited Code", key="run_edited_top"):
+                    self._run_bespoke_screening_with_code(edited_code)
+            with col2:
+                if st.button("❌ Cancel Edit", key="cancel_edit_top"):
+                    st.session_state.show_code_editor = False
+                    st.rerun()
+    
+    def _render_ai_quick_actions(self):
+        """Render AI quick actions section."""
+        st.subheader("⚡ Quick AI Actions")
+        
+        if not self.gemini_screener.is_available():
+            st.info("AI features require Gemini API key")
+            return
+        
+        st.markdown("**Popular screening patterns:**")
+        
+        # Quick action buttons
+        if st.button("🕒 Closing Soon", use_container_width=True, key="quick_closing"):
+            self._run_bespoke_screening("find markets closing in the next 2 hours")
+        
+        if st.button("📈 High Volume", use_container_width=True, key="quick_volume"):
+            self._run_bespoke_screening("show me markets with volume > 5000 and tight spreads")
+        
+        if st.button("💰 Undervalued", use_container_width=True, key="quick_undervalued"):
+            self._run_bespoke_screening("find undervalued markets trading below 30 cents with decent volume")
+        
+        if st.button("🗳️ Elections", use_container_width=True, key="quick_elections"):
+            self._run_bespoke_screening("show me all election-related markets")
+        
+        # Return to standard screening if in bespoke mode
+        if st.session_state.get('screening_mode', 'standard') in ['bespoke', 'bespoke_custom']:
+            st.divider()
+            if st.button("🔙 Return to Standard Screening", use_container_width=True, key="return_standard_top"):
+                self._return_to_standard_screening()
+    
+    def _render_bespoke_screening(self):
+        """Render bespoke screening section with Gemini integration."""
+        with st.sidebar.expander("🤖 AI-Powered Bespoke Screening", expanded=False):
+            if not self.gemini_screener.is_available():
+                st.warning("⚠️ Gemini API not configured. Set GEMINI_API_KEY in your .env file.")
+                st.markdown("Get your API key at: https://makersuite.google.com/app/apikey")
+                return
+            
+            st.markdown("**Describe what markets you're looking for:**")
+            
+            # Examples to help users
+            with st.expander("💡 Example Queries", expanded=False):
+                st.markdown("""
+                - "find markets closing in the next 30 minutes"
+                - "show me markets with volume > 10,000 and spread < 3 cents"
+                - "markets about elections with high volatility"
+                - "find undervalued markets trading below 20 cents"
+                - "markets closing today with low volume"
+                - "show me markets with recent price movement"
+                """)
+            
+            # Text input for user query
+            user_query = st.text_area(
+                "Your query:",
+                placeholder="e.g., find all markets closing in the next hour with volume > 5000",
+                height=100,
+                key="bespoke_query"
+            )
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("🔍 Generate & Run", type="primary", disabled=not user_query.strip()):
+                    self._run_bespoke_screening(user_query.strip())
+            
+            with col2:
+                if st.button("👁️ Preview Code", disabled=not user_query.strip()):
+                    self._preview_bespoke_code(user_query.strip())
+            
+            # Show generated code if available
+            if 'bespoke_code' in st.session_state and st.session_state.bespoke_code:
+                st.markdown("**Generated Code:**")
+                st.code(st.session_state.bespoke_code, language="python")
+                
+                # Option to edit and re-run
+                if st.button("✏️ Edit & Run", key="edit_bespoke"):
+                    st.session_state.show_code_editor = True
+            
+            # Code editor for manual editing
+            if st.session_state.get('show_code_editor', False):
+                st.markdown("**Edit the code:**")
+                edited_code = st.text_area(
+                    "Python code:",
+                    value=st.session_state.get('bespoke_code', ''),
+                    height=200,
+                    key="edited_bespoke_code"
+                )
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("▶️ Run Edited Code"):
+                        self._run_bespoke_screening_with_code(edited_code)
+                with col2:
+                    if st.button("❌ Cancel Edit"):
+                        st.session_state.show_code_editor = False
+                        st.rerun()
+    
+    def _preview_bespoke_code(self, user_query: str):
+        """Generate and preview the bespoke screening code without running it."""
+        with st.spinner("🤖 Generating screening code..."):
+            code = self.gemini_screener.generate_screening_function(user_query)
+            
+            if code:
+                st.session_state.bespoke_code = code
+                st.success("✅ Code generated successfully! Review it below.")
+                st.rerun()
+            else:
+                st.error("❌ Failed to generate screening code. Please try rephrasing your query.")
+    
+    def _run_bespoke_screening(self, user_query: str):
+        """Generate and run bespoke screening based on user query."""
+        with st.spinner("🤖 Generating and running screening..."):
+            # Set AI screening mode first to ensure we get unfiltered data
+            st.session_state.screening_mode = "bespoke"
+            st.session_state.bespoke_query = user_query
+            
+            # If we're coming from standard mode, refresh to get all markets
+            current_mode = st.session_state.get('screening_mode', 'standard')
+            if not st.session_state.get('screening_results') or current_mode == 'standard':
+                st.info("🔄 Loading all markets for AI screening...")
+                self._refresh_markets()
+            
+            # Generate the screening function
+            code = self.gemini_screener.generate_screening_function(user_query)
+            
+            if not code:
+                st.error("❌ Failed to generate screening code. Please try rephrasing your query.")
+                return
+            
+            st.session_state.bespoke_code = code
+            
+            # Get current markets and events
+            if not st.session_state.screening_results:
+                st.warning("⚠️ No market data available. Please try again.")
+                return
+            
+            # Use the existing market-event pairs from screening results
+            try:
+                results = self.gemini_screener.execute_screening_function_from_results(code, st.session_state.screening_results)
+                
+                if results:
+                    # Replace current screening results with bespoke results
+                    st.session_state.screening_results = results
+                    st.session_state.last_update = utc_now()
+                    
+                    passing_count = len([r for r in results if r.score > 0])
+                    st.success(f"✅ AI screening complete! Found {passing_count} matching markets out of {len(results)} total.")
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to execute screening. Please check the generated code.")
+                    st.error("💡 Check the logs for detailed error information.")
+            
+            except ValueError as e:
+                error_msg = str(e)
+                if "Critical market validation failed" in error_msg or "Critical NoneType error" in error_msg:
+                    st.error("🚨 **CRITICAL ERROR**: Market data validation failed!")
+                    st.error("**This indicates a serious issue with the market data from the API.**")
+                    st.error(f"**Error details**: {error_msg}")
+                    st.error("**Next steps**:")
+                    st.markdown("1. Check the application logs for detailed error information")
+                    st.markdown("2. Try refreshing the markets data")
+                    st.markdown("3. If the issue persists, there may be a problem with the Kalshi API response format")
+                    st.stop()  # Stop execution to prevent further errors
+                else:
+                    st.error(f"❌ Screening failed: {error_msg}")
+                    st.error("💡 Check the logs for detailed error information.")
+            
+            except Exception as e:
+                st.error(f"❌ Unexpected error during screening: {str(e)}")
+                st.error("💡 Check the logs for detailed error information.")
+    
+    def _run_bespoke_screening_with_code(self, code: str):
+        """Run bespoke screening with user-provided/edited code."""
+        with st.spinner("▶️ Running custom screening code..."):
+            # Ensure we're in AI screening mode
+            st.session_state.screening_mode = "bespoke_custom"
+            st.session_state.bespoke_code = code
+            
+            # Get current markets and events
+            if not st.session_state.screening_results:
+                st.warning("⚠️ No market data available. Please refresh markets first.")
+                return
+            
+            # Use the existing market-event pairs from screening results
+            try:
+                results = self.gemini_screener.execute_screening_function_from_results(code, st.session_state.screening_results)
+                
+                if results:
+                    # Replace current screening results with bespoke results
+                    st.session_state.screening_results = results
+                    st.session_state.last_update = utc_now()
+                    st.session_state.screening_mode = "bespoke_custom"
+                    st.session_state.bespoke_code = code
+                    st.session_state.show_code_editor = False
+                    
+                    passing_count = len([r for r in results if r.score > 0])
+                    st.success(f"✅ Custom AI screening complete! Found {passing_count} matching markets out of {len(results)} total.")
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to execute screening. Please check your code.")
+                    st.error("💡 Check the logs for detailed error information.")
+            
+            except ValueError as e:
+                error_msg = str(e)
+                if "Critical market validation failed" in error_msg or "Critical NoneType error" in error_msg:
+                    st.error("🚨 **CRITICAL ERROR**: Market data validation failed!")
+                    st.error("**This indicates a serious issue with the market data from the API.**")
+                    st.error(f"**Error details**: {error_msg}")
+                    st.error("**Next steps**:")
+                    st.markdown("1. Check the application logs for detailed error information")
+                    st.markdown("2. Try refreshing the markets data")
+                    st.markdown("3. If the issue persists, there may be a problem with the Kalshi API response format")
+                    st.stop()  # Stop execution to prevent further errors
+                else:
+                    st.error(f"❌ Custom screening failed: {error_msg}")
+                    st.error("💡 Check the logs for detailed error information.")
+            
+            except Exception as e:
+                st.error(f"❌ Unexpected error during custom screening: {str(e)}")
+                st.error("💡 Check the logs for detailed error information.")
+    
+    def _return_to_standard_screening(self):
+        """Return to standard screening mode."""
+        # Clear bespoke screening state
+        if 'screening_mode' in st.session_state:
+            del st.session_state.screening_mode
+        if 'bespoke_query' in st.session_state:
+            del st.session_state.bespoke_query
+        if 'bespoke_code' in st.session_state:
+            del st.session_state.bespoke_code
+        if 'show_code_editor' in st.session_state:
+            del st.session_state.show_code_editor
+        
+        # Refresh with standard screening (this will now apply manual screening criteria)
+        st.info("🔄 Switching back to standard screening with manual criteria...")
+        self._refresh_markets()
     
     def _render_main_content(self):
         """Render main dashboard content."""
@@ -341,17 +694,6 @@ class MarketDashboard:
         
         # Market details
         self._render_market_details()
-    
-    def _auto_refresh_content(self):
-        """Auto-refresh content every 5 seconds."""
-        placeholder = st.empty()
-        
-        with placeholder.container():
-            self._render_main_content()
-        
-        time.sleep(5)
-        self._refresh_markets()
-        st.rerun()
     
     def _render_summary_metrics(self):
         """Render summary metrics."""
@@ -378,10 +720,47 @@ class MarketDashboard:
         with col4:
             st.metric("Failing Markets", summary['total_markets'] - summary['passing_markets'])
         
-        # Current criteria summary
-        if 'screening_criteria' in st.session_state:
+        # Current criteria summary - show different info based on screening mode
+        screening_mode = st.session_state.get('screening_mode', 'standard')
+        
+        if screening_mode in ['bespoke', 'bespoke_custom']:
+            # Show AI screening information
+            with st.expander("🤖 Current AI Screening Criteria", expanded=False):
+                if screening_mode == 'bespoke' and 'bespoke_query' in st.session_state:
+                    st.markdown("**AI Query:**")
+                    st.text(st.session_state.bespoke_query)
+                elif screening_mode == 'bespoke_custom':
+                    st.markdown("**Custom AI Screening:**")
+                    st.text("Using custom-edited AI code")
+                
+                if 'bespoke_code' in st.session_state and st.session_state.bespoke_code:
+                    st.markdown("**Generated Screening Logic:**")
+                    # Show a condensed version of the code
+                    code_lines = st.session_state.bespoke_code.split('\n')
+                    # Find the main logic (skip function definition and docstring)
+                    logic_lines = []
+                    in_logic = False
+                    for line in code_lines:
+                        if 'passes = ' in line or 'reasons = ' in line or in_logic:
+                            in_logic = True
+                            if line.strip() and not line.strip().startswith('"""') and not line.strip().startswith('#'):
+                                logic_lines.append(line.strip())
+                        if 'return passes, reasons' in line:
+                            logic_lines.append(line.strip())
+                            break
+                    
+                    if logic_lines:
+                        st.code('\n'.join(logic_lines[:6]) + ('...' if len(logic_lines) > 6 else ''), language='python')
+                    
+                    if st.button("📝 View Full Code", key="view_full_ai_code"):
+                        st.code(st.session_state.bespoke_code, language='python')
+                
+                st.info("💡 AI screening uses dynamic criteria based on your natural language query, not the manual criteria below.")
+        
+        elif 'screening_criteria' in st.session_state:
+            # Show manual screening criteria
             criteria = st.session_state.screening_criteria
-            with st.expander("📋 Current Screening Criteria", expanded=False):
+            with st.expander("📋 Current Manual Screening Criteria", expanded=False):
                 col1, col2, col3 = st.columns(3)
                 
                 with col1:
@@ -398,12 +777,23 @@ class MarketDashboard:
                     st.text(f"Max Spread: {criteria['max_spread_cents']}¢")
                 
                 with col3:
-                    st.markdown("**Time & Expiry**")
-                    st.text(f"Max Days: {criteria['max_time_to_expiry_days']}")
+                    st.markdown("**Time & Close**")
+                    st.text(f"Max Days: {criteria['max_time_to_close_days']}")
         
-        # Last update time
+        # Last update time and screening mode
         if st.session_state.last_update:
-            st.caption(f"Last updated: {st.session_state.last_update.strftime('%H:%M:%S')}")
+            update_text = f"Last updated: {st.session_state.last_update.strftime('%H:%M:%S')}"
+            
+            # Show screening mode with enhanced clarity
+            if screening_mode == 'bespoke':
+                query = st.session_state.get('bespoke_query', 'Unknown query')
+                update_text += f" | 🤖 **AI Screening**: \"{query[:50]}{'...' if len(query) > 50 else ''}\""
+            elif screening_mode == 'bespoke_custom':
+                update_text += " | 🤖 **AI Screening**: Custom Code"
+            else:
+                update_text += " | 📊 **Manual Screening**: Using criteria from sidebar"
+            
+            st.caption(update_text)
     
     def _render_opportunities_table(self):
         """Render opportunities table."""
@@ -475,7 +865,7 @@ class MarketDashboard:
                 'Spread %': f"{market.spread_percentage:.1%}" if market.spread_percentage else "N/A",
                 'Spread (¢)': f"{spread_cents}¢" if spread_cents else "N/A",
                 'Mid Price': f"{market.mid_price:.2f}" if market.mid_price else "N/A",
-                'Days to Expiry': market.days_to_expiry,
+                'Days to Close': market.days_to_close,
                 'Kalshi Link': kalshi_url,
                 'Reasons': "; ".join(result.reasons[:2])  # Show first 2 reasons
             })
@@ -527,9 +917,9 @@ class MarketDashboard:
                     "Mid Price",
                     help="Midpoint between bid and ask"
                 ),
-                "Days to Expiry": st.column_config.NumberColumn(
-                    "Days to Expiry",
-                    help="Days until market expires"
+                "Days to Close": st.column_config.NumberColumn(
+                    "Days to Close",
+                    help="Days until market closes"
                 )
             }
         )
@@ -688,8 +1078,8 @@ class MarketDashboard:
                 st.markdown(f"**Last Price:** {market.last_price:.2f}" if market.last_price else "**Last Price:** N/A")
                 st.markdown(f"**Mid Price:** {market.mid_price:.2f}" if market.mid_price else "**Mid Price:** N/A")
                 st.markdown(f"**Spread:** {market.spread_percentage:.1%}" if market.spread_percentage else "**Spread:** N/A")
-                st.markdown(f"**Days to Expiry:** {market.days_to_expiry}")
-                st.markdown(f"**Expiry Date:** {market.expiry_date.strftime('%Y-%m-%d %H:%M')}")
+                st.markdown(f"**Days to Close:** {market.days_to_close}")
+                st.markdown(f"**Close Date:** {market.close_date.strftime('%Y-%m-%d %H:%M')}")
             
             # Screening reasons
             st.markdown("**Screening Analysis:**")
@@ -708,9 +1098,27 @@ class MarketDashboard:
                     st.error("No events found")
                     return
                 
-                # Screen events and their markets
-                with st.spinner("Screening events and markets..."):
-                    results = self.screener.screen_events(events)
+                # Check if AI screening is active
+                screening_mode = st.session_state.get('screening_mode', 'standard')
+                
+                if screening_mode in ['bespoke', 'bespoke_custom']:
+                    # For AI screening, create screening results without manual filtering
+                    from models import ScreeningResult
+                    results = []
+                    for event in events:
+                        for market in event.markets:
+                            # Create screening result with score 1.0 (passing) for AI to filter
+                            result = ScreeningResult(
+                                market=market,
+                                event=event,
+                                score=1.0,  # Let AI do the filtering
+                                reasons=["Available for AI screening"]
+                            )
+                            results.append(result)
+                else:
+                    # Standard manual screening
+                    with st.spinner("Screening events and markets..."):
+                        results = self.screener.screen_events(events)
                 
                 # Update session state
                 st.session_state.screening_results = results
@@ -722,7 +1130,10 @@ class MarketDashboard:
                 open_markets = sum(len([m for m in event.markets if m.status == 'active']) for event in events)
                 closed_markets = total_markets - open_markets
                 
-                st.success(f"Refreshed {len(events)} events ({total_markets} markets), found {len([r for r in results if r.score > 0])} markets passing criteria")
+                if screening_mode in ['bespoke', 'bespoke_custom']:
+                    st.success(f"Refreshed {len(events)} events ({total_markets} markets) - Ready for AI screening")
+                else:
+                    st.success(f"Refreshed {len(events)} events ({total_markets} markets), found {len([r for r in results if r.score > 0])} markets passing criteria")
                 st.info(f"📊 Market breakdown: {open_markets} open, {closed_markets} closed")
                 
                 if open_markets == 0:

@@ -27,9 +27,15 @@ class Market(KalshiMarket):
     def spread_percentage(self) -> Optional[float]:
         """Calculate the spread percentage for Yes market."""
         try:
-            # Check if yes_bid and yes_ask exist
+            # Check if yes_bid and yes_ask exist and are not None
             if not hasattr(self, 'yes_bid') or not hasattr(self, 'yes_ask'):
-                logger.warning(f"Market {getattr(self, 'ticker', 'unknown')} missing yes_bid or yes_ask attributes")
+                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} missing yes_bid or yes_ask attributes. "
+                           f"Available attributes: {[attr for attr in dir(self) if not attr.startswith('_')]}")
+                return None
+            
+            if self.yes_bid is None or self.yes_ask is None:
+                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} has None values - "
+                           f"yes_bid: {self.yes_bid}, yes_ask: {self.yes_ask}, status: {getattr(self, 'status', 'unknown')}")
                 return None
             
             # Convert cents to dollars for calculation
@@ -50,9 +56,15 @@ class Market(KalshiMarket):
     def spread_cents(self) -> Optional[int]:
         """Calculate the spread cents for Yes market."""
         try:
-            # Check if yes_bid and yes_ask exist
+            # Check if yes_bid and yes_ask exist and are not None
             if not hasattr(self, 'yes_bid') or not hasattr(self, 'yes_ask'):
-                logger.warning(f"Market {getattr(self, 'ticker', 'unknown')} missing yes_bid or yes_ask attributes")
+                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} missing yes_bid or yes_ask attributes. "
+                           f"Available attributes: {[attr for attr in dir(self) if not attr.startswith('_')]}")
+                return None
+            
+            if self.yes_bid is None or self.yes_ask is None:
+                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} has None values - "
+                           f"yes_bid: {self.yes_bid}, yes_ask: {self.yes_ask}, status: {getattr(self, 'status', 'unknown')}")
                 return None
             
             # Values are already in cents
@@ -64,30 +76,66 @@ class Market(KalshiMarket):
 
     @computed_field
     @property
-    def mid_price(self) -> float:
+    def mid_price(self) -> Optional[float]:
         """Calculate the mid price for Yes market."""
-        # Convert cents to dollars for mid price
-        return (self.yes_bid + self.yes_ask) / 200.0
+        try:
+            # Check if yes_bid and yes_ask exist and are not None
+            if not hasattr(self, 'yes_bid') or not hasattr(self, 'yes_ask'):
+                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} missing yes_bid or yes_ask attributes. "
+                           f"Available attributes: {[attr for attr in dir(self) if not attr.startswith('_')]}")
+                return None
+            
+            if self.yes_bid is None or self.yes_ask is None:
+                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} has None values - "
+                           f"yes_bid: {self.yes_bid}, yes_ask: {self.yes_ask}, status: {getattr(self, 'status', 'unknown')}")
+                return None
+            
+            # Convert cents to dollars for mid price
+            return (self.yes_bid + self.yes_ask) / 200.0
+        except Exception as e:
+            logger.error(f"Error calculating mid price for market {getattr(self, 'ticker', 'unknown')}: {e}")
+            return None
     
     @computed_field
     @property
-    def days_to_expiry(self) -> int:
-        """Calculate days until expiry."""
-        now = utc_now()
-        return (self.expiration_time - now).days
+    def days_to_close(self) -> Optional[int]:
+        """Calculate days until close."""
+        try:
+            if self.close_time is None:
+                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} has no close_time. "
+                           f"Status: {getattr(self, 'status', 'unknown')}, "
+                           f"Open time: {getattr(self, 'open_time', 'None')}, "
+                           f"Expiration time: {getattr(self, 'expiration_time', 'None')}")
+                return None
+            
+            now = utc_now()
+            return (self.close_time - now).days
+        except Exception as e:
+            logger.error(f"Error calculating days to close for market {getattr(self, 'ticker', 'unknown')}: {e}")
+            return None
 
     @computed_field
     @property
-    def days_since_start(self) -> int:
+    def days_since_start(self) -> Optional[int]:
         """Calculate days since start."""
-        now = utc_now()
-        return (now - self.open_time).days
+        try:
+            if self.open_time is None:
+                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} has no open_time. "
+                           f"Status: {getattr(self, 'status', 'unknown')}, "
+                           f"Close time: {getattr(self, 'close_time', 'None')}")
+                return None
+            
+            now = utc_now()
+            return (now - self.open_time).days
+        except Exception as e:
+            logger.error(f"Error calculating days since start for market {getattr(self, 'ticker', 'unknown')}: {e}")
+            return None
     
     @computed_field
     @property
-    def expiry_date(self) -> Optional[datetime]:
-        """Alias for expiration_time for backward compatibility."""
-        return self.expiration_time
+    def close_date(self) -> Optional[datetime]:
+        """Alias for close_time for backward compatibility."""
+        return self.close_time
     
     @computed_field
     @property
@@ -110,7 +158,7 @@ class ScreeningCriteria:
     max_spread_cents: Optional[int] = None
     min_spread_cents: Optional[int] = None
     min_liquidity: Optional[int] = None
-    max_time_to_expiry_days: Optional[int] = None
+    max_time_to_close_days: Optional[int] = None
     min_open_interest: Optional[int] = None
     categories: Optional[List[str]] = None
     
@@ -128,8 +176,8 @@ class ScreeningCriteria:
             raise ValueError("Min spread cents must be non-negative")
         if self.min_liquidity is not None and self.min_liquidity < 0:
             raise ValueError("Minimum liquidity must be non-negative")
-        if self.max_time_to_expiry_days is not None and self.max_time_to_expiry_days < 0:
-            raise ValueError("Max time to expiry must be non-negative")
+        if self.max_time_to_close_days is not None and self.max_time_to_close_days < 0:
+            raise ValueError("Max time to close must be non-negative")
         if self.min_open_interest is not None and self.min_open_interest < 0:
             raise ValueError("Minimum open interest must be non-negative")
 
