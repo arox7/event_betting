@@ -13,7 +13,7 @@ class Config:
     # Kalshi API Configuration
     KALSHI_API_KEY_ID = os.getenv('KALSHI_API_KEY_ID', '')
     KALSHI_PRIVATE_KEY_PATH = os.getenv('KALSHI_PRIVATE_KEY_PATH', '')
-    KALSHI_API_HOST = os.getenv('KALSHI_API_HOST', 'https://api.elections.kalshi.com/')
+    KALSHI_API_HOST = os.getenv('KALSHI_API_HOST', 'https://api.elections.kalshi.com/trade-api/v2')
     KALSHI_DEMO_MODE = os.getenv('KALSHI_DEMO_MODE', 'false').lower() == 'true'
     
     # Gemini API Configuration

@@ -109,10 +109,8 @@ class MarketDashboard:
         else:
             st.sidebar.error("❌ Kalshi API Disconnected")
         
-        # Balance (if authenticated)
-        balance = self.kalshi_client.get_balance()
-        if balance is not None:
-            st.sidebar.metric("Account Balance", f"${balance:.2f}")
+        # Portfolio Overview (if authenticated)
+        self._render_portfolio_overview()
         
         # Refresh controls
         st.sidebar.subheader("Refresh Controls")
@@ -123,6 +121,132 @@ class MarketDashboard:
         
         # Screening criteria with organized sections
         self._render_screening_criteria()
+    
+    def _render_portfolio_overview(self):
+        """Render comprehensive portfolio overview in sidebar."""
+        st.sidebar.subheader("💰 Portfolio Overview")
+        
+        try:
+            # Get portfolio summary
+            portfolio_summary = self.kalshi_client.get_portfolio_summary()
+            
+            if portfolio_summary is None:
+                st.sidebar.info("💡 Login required for portfolio data")
+                return
+            
+            # Main portfolio metrics
+            cash_balance = portfolio_summary.get('cash_balance', 0)
+            total_position_value = portfolio_summary.get('total_position_value', 0)
+            total_balance = portfolio_summary.get('total_balance', 0)
+            unrealized_pnl = portfolio_summary.get('unrealized_pnl', 0)
+            position_count = portfolio_summary.get('position_count', 0)
+            
+            # Display main balance metrics
+            col1, col2 = st.sidebar.columns(2)
+            with col1:
+                st.metric(
+                    "Total Balance",
+                    f"${total_balance:.2f}",
+                    delta=f"${unrealized_pnl:.2f}" if unrealized_pnl != 0 else None,
+                    delta_color="normal"
+                )
+            with col2:
+                st.metric("Positions", f"{position_count}")
+            
+            # Balance breakdown
+            st.sidebar.markdown("**Balance Breakdown**")
+            
+            # Create a simple breakdown chart
+            if total_balance > 0:
+                cash_pct = (cash_balance / total_balance) * 100
+                position_pct = (total_position_value / total_balance) * 100
+                
+                st.sidebar.markdown(f"💵 Cash: ${cash_balance:.2f} ({cash_pct:.1f}%)")
+                st.sidebar.markdown(f"📊 Positions: ${total_position_value:.2f} ({position_pct:.1f}%)")
+                
+                # Progress bars for visual representation
+                st.sidebar.progress(cash_pct / 100, text=f"Cash {cash_pct:.1f}%")
+                st.sidebar.progress(position_pct / 100, text=f"Positions {position_pct:.1f}%")
+            else:
+                st.sidebar.markdown(f"💵 Cash: ${cash_balance:.2f}")
+                st.sidebar.markdown(f"📊 Positions: ${total_position_value:.2f}")
+            
+            # 24h Trading Performance
+            st.sidebar.markdown("**24h Trading Activity**")
+            
+            # Get recent trading P&L
+            recent_pnl_data = self.kalshi_client.get_recent_pnl(hours=24)
+            
+            if recent_pnl_data:
+                realized_pnl = recent_pnl_data.get('realized_pnl', 0)
+                trade_count = recent_pnl_data.get('trade_count', 0)
+                trade_volume = recent_pnl_data.get('trade_volume', 0)
+                
+                # Calculate return percentage based on total balance
+                return_pct = 0
+                if total_balance > 0 and realized_pnl != 0:
+                    return_pct = (realized_pnl / total_balance) * 100
+                
+                # Display PnL metrics
+                pnl_color = "normal" if realized_pnl >= 0 else "inverse"
+                pnl_delta = f"{return_pct:+.2f}%" if return_pct != 0 else None
+                
+                col1, col2 = st.sidebar.columns(2)
+                with col1:
+                    st.metric(
+                        "24h P&L",
+                        f"${realized_pnl:+.2f}",
+                        delta=pnl_delta,
+                        delta_color=pnl_color
+                    )
+                with col2:
+                    st.metric("Trades", f"{trade_count}")
+                
+                # Additional metrics
+                if trade_volume > 0:
+                    st.sidebar.metric("Volume", f"${trade_volume:.2f}")
+                
+                # Performance indicator
+                if realized_pnl > 0:
+                    st.sidebar.success(f"📈 Profitable trading day (+{return_pct:.2f}%)")
+                elif realized_pnl < 0:
+                    st.sidebar.error(f"📉 Trading loss ({return_pct:.2f}%)")
+                elif trade_count > 0:
+                    st.sidebar.info("📊 Break-even trading")
+                else:
+                    st.sidebar.info("💤 No trades today")
+                
+                st.sidebar.caption("📊 Based on realized gains/losses from completed trades")
+            
+            # Top positions (if any)
+            positions = portfolio_summary.get('positions', [])
+            if positions:
+                st.sidebar.markdown("**Top Positions**")
+                
+                # Sort positions by absolute value
+                sorted_positions = sorted(positions, key=lambda x: abs(x.get('position', 0)), reverse=True)
+                
+                # Show top 3 positions
+                for i, position in enumerate(sorted_positions[:3]):
+                    ticker = position.get('market_ticker', 'Unknown')
+                    quantity = position.get('position', 0)
+                    position_value = abs(quantity) / 100.0  # Convert cents to dollars
+                    
+                    # Determine position direction
+                    direction = "📈" if quantity > 0 else "📉"
+                    
+                    st.sidebar.markdown(f"{direction} {ticker}: ${position_value:.2f}")
+                
+                if len(positions) > 3:
+                    st.sidebar.markdown(f"... and {len(positions) - 3} more positions")
+            
+            # Refresh button for portfolio data
+            if st.sidebar.button("🔄 Refresh Portfolio", key="refresh_portfolio"):
+                st.rerun()
+                
+        except Exception as e:
+            st.sidebar.error(f"❌ Portfolio data unavailable: {str(e)}")
+            logger.error(f"Error rendering portfolio overview: {e}")
     
     def _render_screening_criteria(self):
         """Render comprehensive screening criteria with organized sections."""
