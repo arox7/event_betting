@@ -7,8 +7,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timezone
 import logging
+from typing import List, Dict, Any
 
 from kalshi_client import KalshiAPIClient
+from kalshi_websocket import WebSocketManager
 from market_screener import MarketScreener
 from gemini_screener import GeminiScreener
 from config import Config
@@ -28,16 +30,77 @@ class MarketDashboard:
         self.screener = MarketScreener(self.kalshi_client, self.config)
         self.gemini_screener = GeminiScreener(self.config)
         
+        # Initialize WebSocket manager
+        self.ws_manager = WebSocketManager(self.config)
+        
         # Initialize session state
         session_defaults = {
             'screening_results': [],
             'last_update': None,
-            'initial_load_complete': False
+            'initial_load_complete': False,
+            'all_positions': None,
+            'websocket_connected': False,
+            'websocket_messages': [],
+            'ticker_data': {},
+            'position_tickers_subscribed': False,
+            'real_time_pnl_enabled': True
         }
         
         for key, default_value in session_defaults.items():
             if key not in st.session_state:
                 st.session_state[key] = default_value
+    
+    def calculate_real_time_position_values(self, positions, ticker_data):
+        """Calculate real-time position values using WebSocket ticker data."""
+        if not ticker_data:
+            return positions
+        
+        enriched_positions = []
+        for position in positions:
+            market_ticker = position.get('market_ticker', '')
+            
+            # Find the corresponding ticker data
+            ticker_info = ticker_data.get(market_ticker)
+            
+            if ticker_info:
+                # Use current market price for real-time valuation
+                current_bid = ticker_info.get('bid', 0) / 100  # Convert from cents
+                current_ask = ticker_info.get('ask', 0) / 100  # Convert from cents
+                current_mid = (current_bid + current_ask) / 2 if current_bid and current_ask else None
+                
+                # Calculate real-time P&L
+                position_size = position.get('position', 0)
+                if position_size > 0:  # Long position
+                    # For long positions, use bid price (what you could sell for)
+                    current_price = current_bid if current_bid else current_mid
+                else:  # Short position
+                    # For short positions, use ask price (what you'd need to buy back)
+                    current_price = current_ask if current_ask else current_mid
+                
+                if current_price:
+                    # Calculate unrealized P&L
+                    entry_price = position.get('average_price', 0) / 100  # Convert from cents
+                    if entry_price:
+                        price_change = current_price - entry_price
+                        unrealized_pnl = abs(position_size) * price_change
+                        
+                        # Add real-time data to position
+                        position_copy = position.copy()
+                        position_copy['real_time_price'] = current_price
+                        position_copy['real_time_bid'] = current_bid
+                        position_copy['real_time_ask'] = current_ask
+                        position_copy['real_time_mid'] = current_mid
+                        position_copy['unrealized_pnl'] = unrealized_pnl
+                        position_copy['total_pnl'] = position.get('realized_pnl', 0) / 10000 + unrealized_pnl
+                        position_copy['last_ticker_update'] = ticker_info.get('timestamp')
+                        
+                        enriched_positions.append(position_copy)
+                        continue
+            
+            # If no ticker data available, use original position data
+            enriched_positions.append(position)
+        
+        return enriched_positions
     
     def run(self):
         """Run the dashboard."""
@@ -68,8 +131,68 @@ class MarketDashboard:
         """Perform initial data load when dashboard first starts."""
         try:
             # Show loading message in a toast/temporary area
-            with st.spinner("🔄 Loading market data..."):
-                # Refresh markets data
+            with st.spinner("🔄 Loading market data and positions..."):
+                # 1. Get all unsettled and settled positions
+                positions_data = self.kalshi_client.get_all_positions()
+                if positions_data:
+                    st.session_state.all_positions = positions_data
+                    unsettled_count = len(positions_data['unsettled'].get('positions', []) if positions_data['unsettled'] else [])
+                    settled_count = len(positions_data['settled'].get('all_settlements', []) if positions_data['settled'] else [])
+                    st.success(f"✅ Loaded {unsettled_count} unsettled and {settled_count} settled positions")
+                else:
+                    st.warning("⚠️ Could not load positions data")
+                
+                # 2. Start WebSocket connection for real-time data
+                try:
+                    self.ws_manager.start()
+                    st.session_state.websocket_connected = True
+                    st.success("🔌 WebSocket connected for real-time data")
+                    
+                    # Wait a moment for WebSocket to fully connect
+                    import time
+                    time.sleep(1)
+                    
+                    # Subscribe to user data (fills, positions)
+                    try:
+                        self.ws_manager.subscribe_to_user_data()
+                        st.info("📡 Scheduled subscription to user data")
+                    except Exception as e:
+                        st.warning(f"⚠️ Failed to schedule user data subscription: {e}")
+                    
+                    # Subscribe to ticker updates for markets with open positions
+                    if positions_data and positions_data.get('unsettled'):
+                        unsettled_positions = positions_data['unsettled'].get('positions', [])
+                        if unsettled_positions:
+                            # Extract unique market tickers from positions
+                            position_tickers = list(set([
+                                pos.get('market_ticker') for pos in unsettled_positions 
+                                if pos.get('market_ticker') and pos.get('position', 0) != 0
+                            ]))
+                            
+                            if position_tickers:
+                                try:
+                                    self.ws_manager.subscribe_to_position_tickers(position_tickers)
+                                    st.session_state.position_tickers_subscribed = True
+                                    st.success(f"📡 Subscribed to real-time data for {len(position_tickers)} markets with open positions")
+                                    st.caption(f"Markets: {', '.join(position_tickers[:5])}{'...' if len(position_tickers) > 5 else ''}")
+                                except Exception as e:
+                                    st.warning(f"⚠️ Failed to schedule ticker subscription: {e}")
+                                    st.session_state.position_tickers_subscribed = False
+                            else:
+                                st.info("📭 No active positions found - no ticker subscriptions needed")
+                                st.session_state.position_tickers_subscribed = False
+                        else:
+                            st.info("📭 No unsettled positions found - no ticker subscriptions needed")
+                            st.session_state.position_tickers_subscribed = False
+                    else:
+                        st.info("📭 No position data available - no ticker subscriptions needed")
+                        st.session_state.position_tickers_subscribed = False
+                    
+                except Exception as ws_error:
+                    st.warning(f"⚠️ WebSocket connection failed: {ws_error}")
+                    st.session_state.websocket_connected = False
+                
+                # 3. Refresh markets data
                 self._refresh_markets()
             
             # Mark initial load as complete
@@ -108,6 +231,45 @@ class MarketDashboard:
             st.sidebar.success("✅ Kalshi API Connected")
         else:
             st.sidebar.error("❌ Kalshi API Disconnected")
+        
+        # WebSocket Status
+        st.sidebar.subheader("Real-time Data")
+        if st.session_state.websocket_connected:
+            st.sidebar.success("🔌 WebSocket Connected")
+            
+            # Show recent WebSocket messages count
+            recent_messages = self.ws_manager.get_recent_messages()
+            if recent_messages:
+                st.sidebar.info(f"📡 {len(recent_messages)} recent messages")
+                
+                # Show message types
+                message_types = {}
+                for msg in recent_messages:
+                    channel = msg.get('channel', 'unknown')
+                    message_types[channel] = message_types.get(channel, 0) + 1
+                
+                for channel, count in message_types.items():
+                    st.sidebar.caption(f"  • {channel}: {count}")
+        else:
+            st.sidebar.error("❌ WebSocket Disconnected")
+            if st.sidebar.button("🔄 Reconnect WebSocket", key="reconnect_ws"):
+                try:
+                    self.ws_manager.start()
+                    st.session_state.websocket_connected = True
+                    self.ws_manager.subscribe_to_user_data()
+                    st.sidebar.success("✅ WebSocket reconnected")
+                    st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"❌ Reconnection failed: {e}")
+        
+        # Update ticker data if WebSocket is connected
+        if st.session_state.websocket_connected and st.session_state.position_tickers_subscribed:
+            try:
+                ticker_data = self.ws_manager.get_ticker_data()
+                if ticker_data:
+                    st.session_state.ticker_data = ticker_data
+            except Exception as e:
+                logger.warning(f"Failed to get ticker data: {e}")
         
         # Portfolio Overview (if authenticated)
         self._render_portfolio_overview()
@@ -153,6 +315,22 @@ class MarketDashboard:
             with col2:
                 st.metric("Positions", f"{total_positions}")
             
+            # Real-time P&L toggle
+            st.sidebar.markdown("**Real-time Features**")
+            real_time_enabled = st.sidebar.toggle(
+                "Real-time P&L", 
+                value=st.session_state.get('real_time_pnl_enabled', True),
+                help="Use WebSocket ticker data for real-time position values"
+            )
+            st.session_state.real_time_pnl_enabled = real_time_enabled
+            
+            # Show ticker data status
+            if st.session_state.get('ticker_data'):
+                ticker_count = len(st.session_state['ticker_data'])
+                st.sidebar.success(f"📡 Real-time data for {ticker_count} markets")
+            elif st.session_state.get('websocket_connected'):
+                st.sidebar.info("📡 WebSocket connected, waiting for ticker data")
+            
             # Balance breakdown
             st.sidebar.markdown("**Balance Breakdown**")
             
@@ -171,21 +349,31 @@ class MarketDashboard:
                 st.sidebar.markdown(f"💵 Cash: ${cash_balance:.2f}")
                 st.sidebar.markdown(f"📊 Positions: ${total_market_value:.2f}")
             
-            # 24h Trading Performance
-            st.sidebar.markdown("**24h Trading Activity**")
+            # Trading Performance with time period selector
+            st.sidebar.markdown("**Trading Performance**")
             
-            # Get recent trading P&L
-            recent_pnl_data = self.kalshi_client.get_recent_pnl(hours=24)
+            # Time period selector
+            time_period = st.sidebar.selectbox(
+                "Period",
+                options=[1, 3, 7, 14, 30, 90],
+                index=2,  # Default to 7 days
+                format_func=lambda x: f"{x} day{'s' if x > 1 else ''}",
+                help="Select time period for P&L calculation"
+            )
             
-            if recent_pnl_data:
-                realized_pnl = recent_pnl_data.get('realized_pnl', 0)
-                trade_count = recent_pnl_data.get('trade_count', 0)
-                trade_volume = recent_pnl_data.get('trade_volume', 0)
+            # Get realized P&L for selected period
+            pnl_data = self.kalshi_client.get_realized_pnl(days=time_period)
+            
+            if pnl_data:
+                realized_pnl = pnl_data.get('realized_pnl', 0)
+                closed_positions = pnl_data.get('closed_positions', 0)
+                total_cost = pnl_data.get('total_cost', 0)
+                total_proceeds = pnl_data.get('total_proceeds', 0)
                 
-                # Calculate return percentage based on total portfolio value
+                # Calculate return percentage based on total cost
                 return_pct = 0
-                if total_portfolio_value > 0 and realized_pnl != 0:
-                    return_pct = (realized_pnl / total_portfolio_value) * 100
+                if total_cost > 0 and realized_pnl != 0:
+                    return_pct = (realized_pnl / total_cost) * 100
                 
                 # Display PnL metrics
                 pnl_color = "normal" if realized_pnl >= 0 else "inverse"
@@ -194,29 +382,31 @@ class MarketDashboard:
                 col1, col2 = st.sidebar.columns(2)
                 with col1:
                     st.metric(
-                        "24h P&L",
+                        f"{time_period}d P&L",
                         f"${realized_pnl:+.2f}",
                         delta=pnl_delta,
                         delta_color=pnl_color
                     )
                 with col2:
-                    st.metric("Trades", f"{trade_count}")
+                    st.metric("Closed Positions", f"{closed_positions}")
                 
                 # Additional metrics
-                if trade_volume > 0:
-                    st.sidebar.metric("Volume", f"${trade_volume:.2f}")
+                if total_cost > 0:
+                    st.sidebar.metric("Total Cost", f"${total_cost:.2f}")
+                if total_proceeds > 0:
+                    st.sidebar.metric("Total Proceeds", f"${total_proceeds:.2f}")
                 
                 # Performance indicator
                 if realized_pnl > 0:
-                    st.sidebar.success(f"📈 Profitable trading day (+{return_pct:.2f}%)")
+                    st.sidebar.success(f"📈 Profitable period (+{return_pct:.2f}% return)")
                 elif realized_pnl < 0:
-                    st.sidebar.error(f"📉 Trading loss ({return_pct:.2f}%)")
-                elif trade_count > 0:
-                    st.sidebar.info("📊 Break-even trading")
+                    st.sidebar.error(f"📉 Loss period ({return_pct:.2f}% return)")
+                elif closed_positions > 0:
+                    st.sidebar.info("📊 Break-even period")
                 else:
-                    st.sidebar.info("💤 No trades today")
+                    st.sidebar.info("💤 No closed positions in this period")
                 
-                st.sidebar.caption("📊 Based on realized gains/losses from completed trades")
+                st.sidebar.caption(f"📊 Based on {closed_positions} closed positions over {time_period} days")
             
             # Top positions (if any)
             enriched_positions = portfolio_metrics.get('enriched_positions', [])
@@ -392,12 +582,12 @@ class MarketDashboard:
         })
         
         # Apply criteria button
-        if st.sidebar.button("🔄 Apply Criteria & Refresh", type="primary", use_container_width=True):
+        if st.sidebar.button("🔄 Apply Criteria & Refresh", type="primary"):
             self._apply_screening_criteria()
         
         # Return to standard screening button (if in bespoke mode)
         if st.session_state.get('screening_mode', 'standard') in ['bespoke', 'bespoke_custom']:
-            if st.sidebar.button("🔙 Return to Standard Screening", use_container_width=True):
+            if st.sidebar.button("🔙 Return to Standard Screening"):
                 self._return_to_standard_screening()
         
         # Export/Import criteria
@@ -576,22 +766,22 @@ class MarketDashboard:
         st.markdown("**Popular screening patterns:**")
         
         # Quick action buttons
-        if st.button("🕒 Closing Soon", use_container_width=True, key="quick_closing"):
+        if st.button("🕒 Closing Soon", key="quick_closing"):
             self._run_bespoke_screening("find markets closing in the next 2 hours")
         
-        if st.button("📈 High Volume", use_container_width=True, key="quick_volume"):
+        if st.button("📈 High Volume", key="quick_volume"):
             self._run_bespoke_screening("show me markets with volume > 5000 and tight spreads")
         
-        if st.button("💰 Undervalued", use_container_width=True, key="quick_undervalued"):
+        if st.button("💰 Undervalued", key="quick_undervalued"):
             self._run_bespoke_screening("find undervalued markets trading below 30 cents with decent volume")
         
-        if st.button("🗳️ Elections", use_container_width=True, key="quick_elections"):
+        if st.button("🗳️ Elections", key="quick_elections"):
             self._run_bespoke_screening("show me all election-related markets")
         
         # Return to standard screening if in bespoke mode
         if st.session_state.get('screening_mode', 'standard') in ['bespoke', 'bespoke_custom']:
             st.divider()
-            if st.button("🔙 Return to Standard Screening", use_container_width=True, key="return_standard_top"):
+            if st.button("🔙 Return to Standard Screening", key="return_standard_top"):
                 self._return_to_standard_screening()
     
     def _render_bespoke_screening(self):
@@ -803,13 +993,16 @@ class MarketDashboard:
     
     def _render_tabbed_content(self):
         """Render main content with tabs."""
-        tab1, tab2 = st.tabs(["🎯 Market Screening", "💼 Portfolio Overview"])
+        tab1, tab2, tab3 = st.tabs(["🎯 Market Screening", "💼 Portfolio Overview", "📡 Real-time Data"])
         
         with tab1:
             self._render_main_content()
         
         with tab2:
             self._render_portfolio_tab()
+        
+        with tab3:
+            self._render_realtime_data_tab()
     
     def _render_main_content(self):
         """Render main dashboard content."""
@@ -1009,7 +1202,7 @@ class MarketDashboard:
         # Display table with enhanced configuration
         st.data_editor(
             df,
-            use_container_width=True,
+            width=True,
             hide_index=True,
             disabled=True,
             column_config={
@@ -1074,7 +1267,7 @@ class MarketDashboard:
                         market_label, 
                         key=f"select_market_{result.market.ticker}",
                         help=f"View details for {result.market.title[:30]}...",
-                        use_container_width=True
+                        width=True
                     ):
                         st.session_state.selected_market_ticker = result.market.ticker
                         st.rerun()
@@ -1111,7 +1304,7 @@ class MarketDashboard:
             color_discrete_map={'Passing': 'green', 'Failing': 'red'}
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width=True)
     
     def _render_category_breakdown(self):
         """Render category breakdown chart."""
@@ -1140,7 +1333,7 @@ class MarketDashboard:
             title="Markets by Category"
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width=True)
     
     def _render_market_details(self):
         """Render detailed market information."""
@@ -1258,6 +1451,25 @@ class MarketDashboard:
                 st.session_state.screening_results = results
                 st.session_state.last_update = utc_now()
                 
+                # Subscribe to market data only for markets with open positions if WebSocket is connected
+                if st.session_state.websocket_connected and st.session_state.get('position_tickers_subscribed', False):
+                    # Position tickers are already subscribed in the portfolio section
+                    # No need to subscribe to additional markets
+                    pass
+                elif st.session_state.websocket_connected and results:
+                    # Only subscribe to screening results if no position tickers are subscribed
+                    # This is a fallback for users without positions
+                    active_market_tickers = []
+                    for result in results:
+                        if result.market.status == 'active' and result.market.ticker:
+                            active_market_tickers.append(result.market.ticker)
+                    
+                    if active_market_tickers:
+                        # Limit to top 10 markets for screening (much lower than before)
+                        top_markets = active_market_tickers[:10]
+                        self.ws_manager.subscribe_to_market_data(top_markets)
+                        st.info(f"📡 Subscribed to real-time data for {len(top_markets)} screened markets")
+                
                 # Show debugging info
                 total_markets = sum(len(event.markets) for event in events)
                 # Count open markets from the markets list
@@ -1301,6 +1513,13 @@ class MarketDashboard:
             total_portfolio_value = portfolio_metrics.get('total_portfolio_value', 0)
             enriched_positions = portfolio_metrics.get('enriched_positions', [])
             
+            # Apply real-time ticker data if available
+            if st.session_state.get('ticker_data') and st.session_state.get('real_time_pnl_enabled', True):
+                enriched_positions = self.calculate_real_time_position_values(
+                    enriched_positions, 
+                    st.session_state['ticker_data']
+                )
+            
             # Portfolio Summary Section
             st.subheader("📊 Portfolio Summary")
             
@@ -1332,7 +1551,7 @@ class MarketDashboard:
             st.subheader("📈 Position Analysis")
             
             # Create tabs for different views
-            pos_tab1, pos_tab2, pos_tab3 = st.tabs(["📋 All Positions", "🏆 Winners & Losers", "📊 Analytics"])
+            pos_tab1, pos_tab2, pos_tab3, pos_tab4 = st.tabs(["📋 All Positions", "🏆 Winners & Losers", "📊 Analytics", "💰 P&L Analysis"])
             
             with pos_tab1:
                 self._render_positions_table(enriched_positions)
@@ -1342,6 +1561,9 @@ class MarketDashboard:
             
             with pos_tab3:
                 self._render_portfolio_analytics(enriched_positions, portfolio_metrics)
+            
+            with pos_tab4:
+                self._render_pnl_analysis()
                 
         except Exception as e:
             st.error(f"❌ Error loading portfolio data: {e}")
@@ -1349,7 +1571,11 @@ class MarketDashboard:
     
     def _render_positions_table(self, enriched_positions):
         """Render detailed positions table."""
-        st.markdown("### 📋 Current Positions")
+        # Show real-time indicator if ticker data is available
+        if st.session_state.get('ticker_data') and st.session_state.get('real_time_pnl_enabled', True):
+            st.markdown("### 📋 Current Positions 📡 *Real-time P&L*")
+        else:
+            st.markdown("### 📋 Current Positions")
         
         # Filters
         col1, col2, col3 = st.columns(3)
@@ -1450,7 +1676,7 @@ class MarketDashboard:
         # Display table
         st.data_editor(
             df,
-            use_container_width=True,
+            width=True,
             hide_index=True,
             disabled=True,
             column_config={
@@ -1558,7 +1784,7 @@ class MarketDashboard:
                     names=list(category_values.keys()),
                     title="Position Value by Category"
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width=True)
             else:
                 st.info("No category data available.")
         
@@ -1594,7 +1820,7 @@ class MarketDashboard:
                 )
                 
                 fig.update_xaxis(tickangle=45)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width=True)
             else:
                 st.info("No P&L data to display.")
         
@@ -1622,6 +1848,317 @@ class MarketDashboard:
         
         with col4:
             st.metric("Portfolio Return", f"{portfolio_return:+.2f}%")
+    
+    def _render_pnl_analysis(self):
+        """Render detailed P&L analysis with time period selection."""
+        st.markdown("### 💰 Realized P&L Analysis")
+        
+        # Time period selector
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            time_period = st.selectbox(
+                "Analysis Period",
+                options=[1, 3, 7, 14, 30, 90, 180, 365],
+                index=2,  # Default to 7 days
+                format_func=lambda x: f"{x} day{'s' if x > 1 else ''}",
+                help="Select time period for P&L analysis"
+            )
+        
+        with col2:
+            st.info(f"📊 Analyzing realized P&L over the last {time_period} days")
+        
+        # Get P&L data
+        pnl_data = self.kalshi_client.get_realized_pnl(days=time_period)
+        
+        if not pnl_data:
+            st.error("❌ Unable to load P&L data")
+            return
+        
+        realized_pnl = pnl_data.get('realized_pnl', 0)
+        closed_positions = pnl_data.get('closed_positions', 0)
+        total_cost = pnl_data.get('total_cost', 0)
+        total_proceeds = pnl_data.get('total_proceeds', 0)
+        closed_positions_details = pnl_data.get('closed_positions_details', [])
+        
+        if closed_positions == 0:
+            st.info(f"📭 No closed positions found in the last {time_period} days")
+            return
+        
+        # Summary metrics
+        st.markdown("#### 📈 Performance Summary")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            pnl_color = "normal" if realized_pnl >= 0 else "inverse"
+            st.metric(
+                "Realized P&L",
+                f"${realized_pnl:+.2f}",
+                delta_color=pnl_color
+            )
+        
+        with col2:
+            return_pct = (realized_pnl / total_cost) * 100 if total_cost > 0 else 0
+            st.metric(
+                "Return %",
+                f"{return_pct:+.2f}%",
+                delta_color=pnl_color
+            )
+        
+        with col3:
+            st.metric("Closed Positions", closed_positions)
+        
+        with col4:
+            avg_pnl = realized_pnl / closed_positions if closed_positions > 0 else 0
+            st.metric("Avg P&L per Position", f"${avg_pnl:+.2f}")
+        
+        # Detailed breakdown
+        st.markdown("#### 📊 Position Breakdown")
+        
+        if closed_positions_details:
+            # Create DataFrame for detailed view
+            import pandas as pd
+            
+            df_data = []
+            for pos in closed_positions_details:
+                df_data.append({
+                    'Ticker': pos['ticker'],
+                    'Realized P&L': f"${pos['realized_pnl']:+.2f}",
+                    'Total Cost': f"${abs(pos['total_cost']):.2f}",
+                    'Proceeds': f"${abs(pos['market_exposure']):.2f}",
+                    'Return %': f"{(pos['realized_pnl'] / abs(pos['total_cost'])) * 100:+.2f}%" if pos['total_cost'] != 0 else "N/A"
+                })
+            
+            df = pd.DataFrame(df_data)
+            
+            # Sort by P&L
+            df_sorted = df.sort_values('Realized P&L', key=lambda x: x.str.extract(r'([+-]?\d+\.?\d*)')[0].astype(float), ascending=False)
+            
+            st.dataframe(
+                df_sorted,
+                width=True,
+                hide_index=True
+            )
+            
+            # Performance insights
+            st.markdown("#### 🎯 Performance Insights")
+            
+            winning_positions = [pos for pos in closed_positions_details if pos['realized_pnl'] > 0]
+            losing_positions = [pos for pos in closed_positions_details if pos['realized_pnl'] < 0]
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**🏆 Winners**")
+                if winning_positions:
+                    win_rate = len(winning_positions) / closed_positions * 100
+                    avg_win = sum(pos['realized_pnl'] for pos in winning_positions) / len(winning_positions)
+                    total_wins = sum(pos['realized_pnl'] for pos in winning_positions)
+                    
+                    st.metric("Win Rate", f"{win_rate:.1f}%")
+                    st.metric("Average Win", f"${avg_win:.2f}")
+                    st.metric("Total Wins", f"${total_wins:.2f}")
+                else:
+                    st.info("No winning positions")
+            
+            with col2:
+                st.markdown("**📉 Losers**")
+                if losing_positions:
+                    loss_rate = len(losing_positions) / closed_positions * 100
+                    avg_loss = sum(pos['realized_pnl'] for pos in losing_positions) / len(losing_positions)
+                    total_losses = sum(pos['realized_pnl'] for pos in losing_positions)
+                    
+                    st.metric("Loss Rate", f"{loss_rate:.1f}%")
+                    st.metric("Average Loss", f"${avg_loss:.2f}")
+                    st.metric("Total Losses", f"${total_losses:.2f}")
+                else:
+                    st.info("No losing positions")
+        
+        # Cost vs Proceeds analysis
+        if total_cost > 0 and total_proceeds > 0:
+            st.markdown("#### 💵 Cost vs Proceeds Analysis")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.metric("Total Cost", f"${total_cost:.2f}")
+            
+            with col2:
+                st.metric("Total Proceeds", f"${total_proceeds:.2f}")
+            
+            # Simple bar chart
+            import plotly.graph_objects as go
+            
+            fig = go.Figure(data=[
+                go.Bar(name='Cost', x=['Total'], y=[total_cost], marker_color='red'),
+                go.Bar(name='Proceeds', x=['Total'], y=[total_proceeds], marker_color='green'),
+                go.Bar(name='Net P&L', x=['Total'], y=[realized_pnl], marker_color='blue' if realized_pnl >= 0 else 'orange')
+            ])
+            
+            fig.update_layout(
+                title="Cost vs Proceeds vs Net P&L",
+                yaxis_title="Amount ($)",
+                barmode='group'
+            )
+            
+            st.plotly_chart(fig, width=True)
+
+    def _render_realtime_data_tab(self):
+        """Render real-time data tab with WebSocket information."""
+        st.header("📡 Real-time Data Stream")
+        
+        # WebSocket connection status
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            if st.session_state.websocket_connected:
+                st.success("🔌 WebSocket Connected - Receiving real-time data")
+            else:
+                st.error("❌ WebSocket Disconnected - No real-time data")
+        
+        with col2:
+            if st.button("🔄 Refresh Messages", key="refresh_realtime"):
+                st.rerun()
+        
+        # Get recent WebSocket messages
+        recent_messages = self.ws_manager.get_recent_messages()
+        
+        if not recent_messages:
+            st.info("No recent WebSocket messages. Data will appear here when received.")
+            return
+        
+        st.subheader(f"📊 Recent Messages ({len(recent_messages)})")
+        
+        # Group messages by channel
+        messages_by_channel = {}
+        for msg in recent_messages:
+            channel = msg.get('channel', 'unknown')
+            if channel not in messages_by_channel:
+                messages_by_channel[channel] = []
+            messages_by_channel[channel].append(msg)
+        
+        # Create tabs for each channel
+        if messages_by_channel:
+            channel_tabs = st.tabs([f"{channel} ({len(msgs)})" for channel, msgs in messages_by_channel.items()])
+            
+            for i, (channel, messages) in enumerate(messages_by_channel.items()):
+                with channel_tabs[i]:
+                    self._render_channel_messages(channel, messages)
+    
+    def _render_channel_messages(self, channel: str, messages: List[Dict[str, Any]]):
+        """Render messages for a specific channel."""
+        st.markdown(f"**{channel.upper()} Messages**")
+        
+        # Show message summary
+        message_types = {}
+        for msg in messages:
+            msg_type = msg.get('message_type', 'unknown')
+            message_types[msg_type] = message_types.get(msg_type, 0) + 1
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Messages", len(messages))
+        with col2:
+            st.metric("Message Types", len(message_types))
+        with col3:
+            latest_time = max(msg.get('timestamp', datetime.min.replace(tzinfo=timezone.utc)) for msg in messages)
+            st.metric("Latest Message", latest_time.strftime("%H:%M:%S"))
+        
+        # Show recent messages
+        st.markdown("**Recent Messages:**")
+        
+        # Display last 10 messages
+        for msg in messages[-10:]:
+            with st.expander(f"{msg.get('message_type', 'unknown')} - {msg.get('timestamp', '').strftime('%H:%M:%S')}", expanded=False):
+                # Pretty print the message data
+                data = msg.get('data', {})
+                
+                # Handle different message types
+                if channel == 'market_positions':
+                    self._render_position_update(data)
+                elif channel == 'fills':
+                    self._render_fill_update(data)
+                elif channel == 'orderbook_updates':
+                    self._render_orderbook_update(data)
+                elif channel == 'market_ticker':
+                    self._render_ticker_update(data)
+                elif channel == 'public_trades':
+                    self._render_trade_update(data)
+                else:
+                    # Generic display
+                    st.json(data)
+    
+    def _render_position_update(self, data: Dict[str, Any]):
+        """Render position update message."""
+        if 'position' in data:
+            pos = data['position']
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Ticker", pos.get('ticker', 'N/A'))
+            with col2:
+                st.metric("Position", pos.get('position', 0))
+            with col3:
+                st.metric("Market Value", f"${pos.get('market_exposure', 0) / 100:.2f}")
+        
+        if 'market_ticker' in data:
+            st.markdown(f"**Market:** {data['market_ticker']}")
+    
+    def _render_fill_update(self, data: Dict[str, Any]):
+        """Render fill update message."""
+        if 'fill' in data:
+            fill = data['fill']
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Ticker", fill.get('ticker', 'N/A'))
+            with col2:
+                st.metric("Side", fill.get('side', 'N/A'))
+            with col3:
+                st.metric("Count", fill.get('count', 0))
+            with col4:
+                st.metric("Price", f"{fill.get('price', 0) / 100:.2f}")
+    
+    def _render_orderbook_update(self, data: Dict[str, Any]):
+        """Render orderbook update message."""
+        if 'market_ticker' in data:
+            st.markdown(f"**Market:** {data['market_ticker']}")
+        
+        if 'yes_bid' in data and 'yes_ask' in data:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Yes Bid", f"{data['yes_bid'] / 100:.2f}")
+                st.metric("Yes Ask", f"{data['yes_ask'] / 100:.2f}")
+            with col2:
+                st.metric("No Bid", f"{data['no_bid'] / 100:.2f}")
+                st.metric("No Ask", f"{data['no_ask'] / 100:.2f}")
+    
+    def _render_ticker_update(self, data: Dict[str, Any]):
+        """Render ticker update message."""
+        if 'market_ticker' in data:
+            st.markdown(f"**Market:** {data['market_ticker']}")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Last Price", f"{data.get('last_price', 0) / 100:.2f}")
+        with col2:
+            st.metric("Volume 24h", f"{data.get('volume_24h', 0):,}")
+        with col3:
+            st.metric("Open Interest", f"{data.get('open_interest', 0):,}")
+    
+    def _render_trade_update(self, data: Dict[str, Any]):
+        """Render trade update message."""
+        if 'market_ticker' in data:
+            st.markdown(f"**Market:** {data['market_ticker']}")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Side", data.get('side', 'N/A'))
+        with col2:
+            st.metric("Count", data.get('count', 0))
+        with col3:
+            st.metric("Price", f"{data.get('price', 0) / 100:.2f}")
+        with col4:
+            st.metric("Timestamp", data.get('ts', 'N/A'))
 
 def main():
     """Main function to run the dashboard."""

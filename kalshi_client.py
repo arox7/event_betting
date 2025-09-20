@@ -7,7 +7,6 @@ from datetime import datetime, timezone, timedelta
 import kalshi_python
 import requests
 import base64
-import time
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -28,14 +27,6 @@ class KalshiAPIClient:
         self._private_key = None
         self._load_private_key()
         
-        # Simple in-memory cache with TTL
-        self._cache = {}
-        self._cache_ttl = {
-            'market': 300,      # 5 minutes for market data
-            'balance': 300,      # 1 minute for balance
-            'positions': 300,    # 30 seconds for positions
-            'events': 300       # 10 minutes for events
-        }
         
     def _initialize_client(self):
         """Initialize the official Kalshi client."""
@@ -80,62 +71,6 @@ class KalshiAPIClient:
             logger.error(f"Failed to load private key: {e}")
             self._private_key = None
     
-    def _get_cache_key(self, cache_type: str, identifier: str = "") -> str:
-        """Generate cache key."""
-        return f"{cache_type}:{identifier}" if identifier else cache_type
-    
-    def _is_cache_valid(self, cache_key: str, cache_type: str) -> bool:
-        """Check if cached data is still valid."""
-        if cache_key not in self._cache:
-            return False
-        
-        cached_time, _ = self._cache[cache_key]
-        ttl = self._cache_ttl.get(cache_type, 300)
-        return (time.time() - cached_time) < ttl
-    
-    def _get_cached(self, cache_type: str, identifier: str = ""):
-        """Get cached data if valid."""
-        cache_key = self._get_cache_key(cache_type, identifier)
-        if self._is_cache_valid(cache_key, cache_type):
-            _, data = self._cache[cache_key]
-            logger.debug(f"Cache hit for {cache_key}")
-            return data
-        return None
-    
-    def _set_cache(self, cache_type: str, data: Any, identifier: str = ""):
-        """Set cached data."""
-        cache_key = self._get_cache_key(cache_type, identifier)
-        self._cache[cache_key] = (time.time(), data)
-        logger.debug(f"Cache set for {cache_key}")
-    
-    def clear_cache(self, cache_type: Optional[str] = None):
-        """Clear cache entries. If cache_type is None, clear all cache."""
-        if cache_type is None:
-            self._cache.clear()
-            logger.info("Cleared all cache")
-        else:
-            keys_to_remove = [key for key in self._cache.keys() if key.startswith(f"{cache_type}:")]
-            for key in keys_to_remove:
-                del self._cache[key]
-            logger.info(f"Cleared {len(keys_to_remove)} cache entries for {cache_type}")
-    
-    def get_cache_stats(self) -> Dict[str, Any]:
-        """Get cache statistics for monitoring."""
-        stats = {
-            'total_entries': len(self._cache),
-            'by_type': {},
-            'expired_entries': 0
-        }
-        
-        for cache_key in self._cache.keys():
-            cache_type = cache_key.split(':')[0]
-            stats['by_type'][cache_type] = stats['by_type'].get(cache_type, 0) + 1
-            
-            # Check if expired
-            if not self._is_cache_valid(cache_key, cache_type):
-                stats['expired_entries'] += 1
-        
-        return stats
     
     def _create_signature(self, timestamp: str, method: str, path: str) -> str:
         """Create the request signature for Kalshi API authentication."""
@@ -321,11 +256,6 @@ class KalshiAPIClient:
     
     def get_market_by_ticker(self, ticker: str) -> Optional[Market]:
         """Fetch a specific market by ticker."""
-        # Check cache first
-        cached_market = self._get_cached('market', ticker)
-        if cached_market is not None:
-            return cached_market
-        
         if not self.client:
             logger.error("Client not initialized")
             return None
@@ -335,8 +265,6 @@ class KalshiAPIClient:
             if response.market:
                 market_dict = response.market.to_dict()
                 market = Market.model_validate(market_dict)
-                # Cache the result
-                self._set_cache('market', market, ticker)
                 return market
             return None
         except Exception as e:
@@ -367,11 +295,6 @@ class KalshiAPIClient:
     
     def get_balance(self) -> Optional[float]:
         """Get account balance in dollars using raw HTTP requests."""
-        # Check cache first
-        cached_balance = self._get_cached('balance')
-        if cached_balance is not None:
-            return cached_balance
-        
         if not self.config.KALSHI_API_KEY_ID or not self._private_key:
             logger.error("API credentials not properly configured")
             return None
@@ -389,21 +312,14 @@ class KalshiAPIClient:
             balance_cents = data.get('balance', 0)
             balance = balance_cents / 100.0  # Convert cents to dollars
             
-            # Cache the result
-            self._set_cache('balance', balance)
             return balance
             
         except Exception as e:
             logger.error(f"Failed to get balance: {e}")
             return None
     
-    def get_all_positions(self) -> Optional[Dict[str, Any]]:
-        """Get all portfolio positions using raw HTTP requests with pagination."""
-        # Check cache first
-        cached_positions = self._get_cached('positions')
-        if cached_positions is not None:
-            return cached_positions
-        
+    def get_unsettled_positions(self) -> Optional[Dict[str, Any]]:
+        """Get unsettled portfolio positions using raw HTTP requests with pagination."""
         if not self.config.KALSHI_API_KEY_ID or not self._private_key:
             logger.error("API credentials not properly configured")
             return None
@@ -417,8 +333,7 @@ class KalshiAPIClient:
                 # Build request parameters
                 params = {
                     'limit': 200,
-                    'count_up': 1,      # Minimum count up value (YES positions)
-                    'count_down': 1     # Minimum count down value (NO positions)
+                    'settlement_status': 'unsettled'
                 }
                 if cursor:
                     params['cursor'] = cursor
@@ -450,24 +365,71 @@ class KalshiAPIClient:
             
             result = {
                 'positions': active_positions,  # Only positions with actual holdings
-                'market_positions': all_market_positions,  # All market positions from API
-                'event_positions': all_event_positions,    # Event-level position data
+                'active_positions': active_positions,  # Only positions with actual holdings
+                'all_market_positions': all_market_positions,  # All market positions from API
+                'all_event_positions': all_event_positions,    # Event-level position data
                 'cursor': None  # No cursor since we got everything
             }
             
-            # Cache the result
-            self._set_cache('positions', result)
             return result
             
         except Exception as e:
-            logger.error(f"Failed to get all positions: {e}")
+            logger.error(f"Failed to get unsettled positions: {e}")
+            return None
+    
+    def get_settled_positions(self) -> Optional[Dict[str, Any]]:
+        """Get settled portfolio positions using raw HTTP requests with pagination."""
+        if not self.config.KALSHI_API_KEY_ID or not self._private_key:
+            logger.error("API credentials not properly configured")
+            return None
+            
+        try:
+            all_settlements = []
+            cursor = None
+            
+            while True:
+                # Build request parameters
+                params = {
+                    'limit': 200,
+                }
+                if cursor:
+                    params['cursor'] = cursor
+                
+                # Make authenticated request
+                path = "/portfolio/settlements"
+                response = self._make_authenticated_request("GET", path, params)
+                
+                if response.status_code != 200:
+                    logger.error(f"API call failed: {response.status_code} - {response.text}")
+                    return None
+                
+                data = response.json()
+                settlements = data.get('settlements', [])
+                
+                # Add to our collections
+                all_settlements.extend(settlements)
+                
+                # Check if there are more pages
+                cursor = data.get('cursor')
+                if not cursor:
+                    break
+            
+            result = {
+                'all_settlements': all_settlements,  # All settlements from API
+                'cursor': None  # No cursor since we got everything
+            }
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to get settled positions: {e}")
             return None
     
     def get_enriched_positions(self) -> Optional[List[Dict[str, Any]]]:
         """Get positions enriched with market and event data."""
         try:
             # Get positions
-            positions_data = self.get_all_positions()
+            positions_data = self.get_unsettled_positions()
             if not positions_data:
                 return None
             
@@ -597,7 +559,7 @@ class KalshiAPIClient:
                 return None
             
             # Get positions
-            positions_data = self.get_all_positions()
+            positions_data = self.get_unsettled_positions()
             if positions_data is None:
                 return None
             
@@ -679,6 +641,58 @@ class KalshiAPIClient:
             logger.error(f"Failed to get portfolio metrics: {e}")
             return None
 
+    def get_realized_pnl(self, days: int = 7) -> Optional[Dict[str, Any]]:
+        """Get realized P&L from closed positions over the specified period."""
+        try:
+            from datetime import datetime, timezone, timedelta
+            
+            # Get all positions to find closed ones
+            positions_data = self.get_unsettled_positions()
+            if positions_data is None:
+                return {'realized_pnl': 0, 'closed_positions': 0, 'total_cost': 0, 'total_proceeds': 0}
+            
+            positions = positions_data.get('positions', [])
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+            
+            total_realized_pnl = 0
+            closed_positions = []
+            total_cost = 0
+            total_proceeds = 0
+            
+            for position in positions:
+                # Check if position has realized P&L (indicates it was closed)
+                realized_pnl = position.get('realized_pnl', 0)
+                if realized_pnl != 0:
+                    # This position was closed and has realized P&L
+                    total_realized_pnl += realized_pnl / 100.0  # Convert cents to dollars
+                    
+                    # Track cost and proceeds for analysis
+                    total_cost_cents = position.get('total_cost', 0)
+                    market_exposure_cents = position.get('market_exposure', 0)
+                    
+                    total_cost += abs(total_cost_cents) / 100.0
+                    total_proceeds += abs(market_exposure_cents) / 100.0
+                    
+                    closed_positions.append({
+                        'ticker': position.get('ticker', 'Unknown'),
+                        'realized_pnl': realized_pnl / 100.0,
+                        'total_cost': total_cost_cents / 100.0,
+                        'market_exposure': market_exposure_cents / 100.0
+                    })
+            
+            return {
+                'realized_pnl': total_realized_pnl,
+                'closed_positions': len(closed_positions),
+                'total_cost': total_cost,
+                'total_proceeds': total_proceeds,
+                'closed_positions_details': closed_positions,
+                'period_days': days
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get realized PnL: {e}")
+            return {'realized_pnl': 0, 'closed_positions': 0, 'total_cost': 0, 'total_proceeds': 0}
+
     def get_recent_pnl(self, hours: int = 24) -> Optional[Dict[str, Any]]:
         """Get realized P&L from recent trading activity."""
         try:
@@ -743,6 +757,29 @@ class KalshiAPIClient:
             logger.error(f"Failed to get recent PnL: {e}")
             return {'realized_pnl': 0, 'trade_count': 0, 'trades': []}
     
+    def get_all_positions(self) -> Optional[Dict[str, Any]]:
+        """Get all positions (both settled and unsettled) on dashboard startup."""
+        try:
+            # Get unsettled positions
+            unsettled_data = self.get_unsettled_positions()
+            
+            # Get settled positions
+            settled_data = self.get_settled_positions()
+            
+            result = {
+                'unsettled': unsettled_data,
+                'settled': settled_data,
+                'timestamp': datetime.now(timezone.utc)
+            }
+            
+            logger.info(f"Retrieved {len(unsettled_data.get('positions', []) if unsettled_data else [])} unsettled positions and {len(settled_data.get('all_settlements', []) if settled_data else [])} settled positions")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to get all positions: {e}")
+            return None
+
     def health_check(self) -> bool:
         """Check if the API client is working properly."""
         try:
