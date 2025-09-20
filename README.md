@@ -85,9 +85,10 @@ The dashboard will be available at `http://localhost:8501` (or your specified po
 
 ## Dashboard Features
 
+- **Portfolio Overview**: Complete portfolio tracking with cash, positions, and P&L
 - **Market Data Analysis**: Fetch and analyze current market data on demand
 - **AI-Powered Screening**: Use natural language to create custom market filters
-- **Summary Metrics**: Total markets, opportunities, and filtering statistics
+- **Trading Performance**: 24-hour realized P&L and trading activity tracking
 - **Interactive Tables**: Sortable and filterable market data
 - **Visual Analytics**: Charts and graphs for market distribution and trends
 - **Market Details**: Detailed view of individual markets with full information
@@ -120,6 +121,35 @@ The dashboard includes advanced AI features powered by Google Gemini:
 - "Undervalued markets with recent volume spikes"
 - "Markets where the probability seems disconnected from fundamentals"
 
+## Portfolio Tracking
+
+The dashboard provides comprehensive portfolio management:
+
+### **Balance Overview**
+- **Total Portfolio Value**: Cash + current market value of all positions
+- **Cash Balance**: Available funds for trading
+- **Position Value**: Current market value of all holdings
+- **Position Count**: Number of active positions
+
+### **Performance Tracking**
+- **24-Hour P&L**: Realized gains/losses from completed trades
+- **Trading Activity**: Number of trades and total volume
+- **Return Percentage**: Performance relative to portfolio size
+- **Top Positions**: Largest holdings by value
+
+### **P&L Calculation**
+The dashboard uses a **realized P&L approach** for performance tracking:
+- Tracks actual gains/losses from completed trades
+- Calculates based on trade fills from the last 24 hours
+- Shows trading volume and activity metrics
+- Simple and transparent - no complex historical tracking required
+
+### **Data Sources**
+All portfolio data comes directly from the [Kalshi Portfolio API](https://docs.kalshi.com/python-sdk/api/PortfolioApi):
+- `/portfolio/balance` - Cash balance
+- `/portfolio/positions` - Current positions  
+- `/portfolio/fills` - Trading history for P&L calculation
+
 ## Project Structure
 
 ```
@@ -151,6 +181,8 @@ To use the dashboard, you'll need:
 3. **Gemini API Key**: For AI-powered features (get from [Google AI Studio](https://makersuite.google.com/app/apikey))
 
 The application uses proper RSA-PSS signature authentication as specified in the [Kalshi API documentation](https://docs.kalshi.com/getting_started/api_keys). This provides better security and follows Kalshi's recommended authentication method.
+
+**Note**: Portfolio features require authentication. The dashboard will show "Login required for portfolio data" if not properly authenticated.
 
 ## Logging
 
@@ -187,7 +219,8 @@ The dashboard is built with Streamlit and can be customized by modifying `dashbo
 2. **No Markets Found**: Verify the API is returning data and check filters  
 3. **Dashboard Not Loading**: Ensure Streamlit is installed and port is available
 4. **AI Features Not Working**: Verify your Gemini API key is set in the `.env` file
-5. **Permission Errors**: Make sure the startup script is executable: `chmod +x run_dashboard.sh`
+5. **Portfolio Data Missing**: Check that your Kalshi API credentials are valid and authenticated
+6. **Permission Errors**: Make sure the startup script is executable: `chmod +x run_dashboard.sh`
 
 ### Debug Mode
 

@@ -22,114 +22,61 @@ class Market(KalshiMarket):
     open_interest: Optional[int] = None
     liquidity_dollars: Optional[float] = None
     
+    
     @computed_field
     @property
     def spread_percentage(self) -> Optional[float]:
         """Calculate the spread percentage for Yes market."""
-        try:
-            # Check if yes_bid and yes_ask exist and are not None
-            if not hasattr(self, 'yes_bid') or not hasattr(self, 'yes_ask'):
-                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} missing yes_bid or yes_ask attributes. "
-                           f"Available attributes: {[attr for attr in dir(self) if not attr.startswith('_')]}")
-                return None
-            
-            if self.yes_bid is None or self.yes_ask is None:
-                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} has None values - "
-                           f"yes_bid: {self.yes_bid}, yes_ask: {self.yes_ask}, status: {getattr(self, 'status', 'unknown')}")
-                return None
-            
-            # Convert cents to dollars for calculation
-            yes_bid_dollars = self.yes_bid / 100.0
-            yes_ask_dollars = self.yes_ask / 100.0
-            
-            if yes_bid_dollars == 0:
-                return 0
-            
-            spread_pct = (yes_ask_dollars - yes_bid_dollars) / yes_bid_dollars
-            return spread_pct
-        except Exception as e:
-            logger.error(f"Error calculating spread percentage for market {getattr(self, 'ticker', 'unknown')}: {e}")
+        if self.yes_bid is None or self.yes_ask is None or self.yes_bid == 0:
             return None
+        
+        # Convert cents to dollars for calculation
+        yes_bid_dollars = self.yes_bid / 100.0
+        yes_ask_dollars = self.yes_ask / 100.0
+        
+        spread_pct = (yes_ask_dollars - yes_bid_dollars) / yes_bid_dollars
+        return spread_pct
 
     @computed_field
     @property
     def spread_cents(self) -> Optional[int]:
         """Calculate the spread cents for Yes market."""
-        try:
-            # Check if yes_bid and yes_ask exist and are not None
-            if not hasattr(self, 'yes_bid') or not hasattr(self, 'yes_ask'):
-                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} missing yes_bid or yes_ask attributes. "
-                           f"Available attributes: {[attr for attr in dir(self) if not attr.startswith('_')]}")
-                return None
-            
-            if self.yes_bid is None or self.yes_ask is None:
-                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} has None values - "
-                           f"yes_bid: {self.yes_bid}, yes_ask: {self.yes_ask}, status: {getattr(self, 'status', 'unknown')}")
-                return None
-            
-            # Values are already in cents
-            spread_cents = self.yes_ask - self.yes_bid
-            return spread_cents
-        except Exception as e:
-            logger.error(f"Error calculating spread cents for market {getattr(self, 'ticker', 'unknown')}: {e}")
+        if self.yes_bid is None or self.yes_ask is None:
             return None
+        
+        # Values are already in cents
+        spread_cents = self.yes_ask - self.yes_bid
+        return spread_cents
 
     @computed_field
     @property
     def mid_price(self) -> Optional[float]:
         """Calculate the mid price for Yes market."""
-        try:
-            # Check if yes_bid and yes_ask exist and are not None
-            if not hasattr(self, 'yes_bid') or not hasattr(self, 'yes_ask'):
-                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} missing yes_bid or yes_ask attributes. "
-                           f"Available attributes: {[attr for attr in dir(self) if not attr.startswith('_')]}")
-                return None
-            
-            if self.yes_bid is None or self.yes_ask is None:
-                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} has None values - "
-                           f"yes_bid: {self.yes_bid}, yes_ask: {self.yes_ask}, status: {getattr(self, 'status', 'unknown')}")
-                return None
-            
-            # Convert cents to dollars for mid price
-            return (self.yes_bid + self.yes_ask) / 200.0
-        except Exception as e:
-            logger.error(f"Error calculating mid price for market {getattr(self, 'ticker', 'unknown')}: {e}")
+        if self.yes_bid is None or self.yes_ask is None:
             return None
+        
+        # Convert cents to dollars for mid price
+        return (self.yes_bid + self.yes_ask) / 200.0
     
     @computed_field
     @property
     def days_to_close(self) -> Optional[int]:
         """Calculate days until close."""
-        try:
-            if self.close_time is None:
-                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} has no close_time. "
-                           f"Status: {getattr(self, 'status', 'unknown')}, "
-                           f"Open time: {getattr(self, 'open_time', 'None')}, "
-                           f"Expiration time: {getattr(self, 'expiration_time', 'None')}")
-                return None
-            
-            now = utc_now()
-            return (self.close_time - now).days
-        except Exception as e:
-            logger.error(f"Error calculating days to close for market {getattr(self, 'ticker', 'unknown')}: {e}")
+        if self.close_time is None:
             return None
+        
+        now = utc_now()
+        return (self.close_time - now).days
 
     @computed_field
     @property
     def days_since_start(self) -> Optional[int]:
         """Calculate days since start."""
-        try:
-            if self.open_time is None:
-                logger.error(f"MARKET_PROPERTY_ERROR: Market {getattr(self, 'ticker', 'unknown')} has no open_time. "
-                           f"Status: {getattr(self, 'status', 'unknown')}, "
-                           f"Close time: {getattr(self, 'close_time', 'None')}")
-                return None
-            
-            now = utc_now()
-            return (now - self.open_time).days
-        except Exception as e:
-            logger.error(f"Error calculating days since start for market {getattr(self, 'ticker', 'unknown')}: {e}")
+        if self.open_time is None:
             return None
+        
+        now = utc_now()
+        return (now - self.open_time).days
     
     @computed_field
     @property
@@ -195,12 +142,31 @@ class Event(KalshiEvent):
             return []
         
         if not isinstance(v, list):
-            logger.warning(f"Markets field is not a list: {type(v)}")
+            logger.debug(f"Markets field is not a list: {type(v)}, returning empty list")
+            return []
+        
+        # If markets list is empty or contains no valid data, return empty list
+        if not v:
             return []
         
         validated_markets = []
         for market_data in v:
-            validated_markets.append(Market.model_validate(market_data, strict=False))
+            try:
+                # Preprocess market data to handle known issues
+                if isinstance(market_data, dict):
+                    market_data = market_data.copy()
+                    status = market_data.get('status')
+                    valid_statuses = {'initialized', 'active', 'closed', 'settled', 'determined'}
+                    if status and status not in valid_statuses:
+                        logger.debug(f"Converting non-standard status '{status}' market {market_data.get('ticker', 'unknown')} to 'closed' in event validation")
+                        market_data['status'] = 'closed'
+                
+                # Use strict=False to be more lenient with validation
+                validated_markets.append(Market.model_validate(market_data, strict=False))
+            except Exception as e:
+                market_ticker = market_data.get('ticker', 'unknown') if isinstance(market_data, dict) else 'unknown'
+                logger.debug(f"Skipping invalid market {market_ticker} in event: {e}")
+                continue
         return validated_markets
     
     @computed_field

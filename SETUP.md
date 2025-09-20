@@ -24,10 +24,6 @@ Create a `.env` file in the project root with your credentials:
 KALSHI_API_KEY_ID=your-api-key-id-here
 KALSHI_PRIVATE_KEY_PATH=path/to/private_key.pem
 
-# Environment (demo or production)
-KALSHI_DEMO_MODE=true
-KALSHI_API_HOST=https://api.elections.kalshi.com/trade-api/v2
-
 # Dashboard Configuration
 DASHBOARD_PORT=8501
 DASHBOARD_HOST=localhost
