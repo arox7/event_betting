@@ -61,8 +61,8 @@ class MarketDashboard:
         # AI Components at the top
         self._render_ai_components_top()
         
-        # Main content (full width)
-        self._render_main_content()
+        # Main content with tabs
+        self._render_tabbed_content()
     
     def _initial_data_load(self):
         """Perform initial data load when dashboard first starts."""
@@ -127,49 +127,49 @@ class MarketDashboard:
         st.sidebar.subheader("💰 Portfolio Overview")
         
         try:
-            # Get portfolio summary
-            portfolio_summary = self.kalshi_client.get_portfolio_summary()
+            # Get portfolio metrics using shared method
+            portfolio_metrics = self.kalshi_client.get_portfolio_metrics()
             
-            if portfolio_summary is None:
+            if portfolio_metrics is None:
                 st.sidebar.info("💡 Login required for portfolio data")
                 return
             
             # Main portfolio metrics
-            cash_balance = portfolio_summary.get('cash_balance', 0)
-            total_position_value = portfolio_summary.get('total_position_value', 0)
-            total_balance = portfolio_summary.get('total_balance', 0)
-            unrealized_pnl = portfolio_summary.get('unrealized_pnl', 0)
-            position_count = portfolio_summary.get('position_count', 0)
+            cash_balance = portfolio_metrics.get('cash_balance', 0)
+            total_market_value = portfolio_metrics.get('total_market_value', 0)
+            total_portfolio_value = portfolio_metrics.get('total_portfolio_value', 0)
+            total_unrealized_pnl = portfolio_metrics.get('total_unrealized_pnl', 0)
+            total_positions = portfolio_metrics.get('total_positions', 0)
             
             # Display main balance metrics
             col1, col2 = st.sidebar.columns(2)
             with col1:
                 st.metric(
                     "Total Balance",
-                    f"${total_balance:.2f}",
-                    delta=f"${unrealized_pnl:.2f}" if unrealized_pnl != 0 else None,
+                    f"${total_portfolio_value:.2f}",
+                    delta=f"${total_unrealized_pnl:.2f}" if total_unrealized_pnl != 0 else None,
                     delta_color="normal"
                 )
             with col2:
-                st.metric("Positions", f"{position_count}")
+                st.metric("Positions", f"{total_positions}")
             
             # Balance breakdown
             st.sidebar.markdown("**Balance Breakdown**")
             
             # Create a simple breakdown chart
-            if total_balance > 0:
-                cash_pct = (cash_balance / total_balance) * 100
-                position_pct = (total_position_value / total_balance) * 100
+            if total_portfolio_value > 0:
+                cash_pct = (cash_balance / total_portfolio_value) * 100
+                position_pct = (total_market_value / total_portfolio_value) * 100
                 
                 st.sidebar.markdown(f"💵 Cash: ${cash_balance:.2f} ({cash_pct:.1f}%)")
-                st.sidebar.markdown(f"📊 Positions: ${total_position_value:.2f} ({position_pct:.1f}%)")
+                st.sidebar.markdown(f"📊 Positions: ${total_market_value:.2f} ({position_pct:.1f}%)")
                 
                 # Progress bars for visual representation
                 st.sidebar.progress(cash_pct / 100, text=f"Cash {cash_pct:.1f}%")
                 st.sidebar.progress(position_pct / 100, text=f"Positions {position_pct:.1f}%")
             else:
                 st.sidebar.markdown(f"💵 Cash: ${cash_balance:.2f}")
-                st.sidebar.markdown(f"📊 Positions: ${total_position_value:.2f}")
+                st.sidebar.markdown(f"📊 Positions: ${total_market_value:.2f}")
             
             # 24h Trading Performance
             st.sidebar.markdown("**24h Trading Activity**")
@@ -182,10 +182,10 @@ class MarketDashboard:
                 trade_count = recent_pnl_data.get('trade_count', 0)
                 trade_volume = recent_pnl_data.get('trade_volume', 0)
                 
-                # Calculate return percentage based on total balance
+                # Calculate return percentage based on total portfolio value
                 return_pct = 0
-                if total_balance > 0 and realized_pnl != 0:
-                    return_pct = (realized_pnl / total_balance) * 100
+                if total_portfolio_value > 0 and realized_pnl != 0:
+                    return_pct = (realized_pnl / total_portfolio_value) * 100
                 
                 # Display PnL metrics
                 pnl_color = "normal" if realized_pnl >= 0 else "inverse"
@@ -219,26 +219,26 @@ class MarketDashboard:
                 st.sidebar.caption("📊 Based on realized gains/losses from completed trades")
             
             # Top positions (if any)
-            positions = portfolio_summary.get('positions', [])
-            if positions:
+            enriched_positions = portfolio_metrics.get('enriched_positions', [])
+            if enriched_positions:
                 st.sidebar.markdown("**Top Positions**")
                 
-                # Sort positions by absolute value
-                sorted_positions = sorted(positions, key=lambda x: abs(x.get('position', 0)), reverse=True)
+                # Sort positions by absolute market value
+                sorted_positions = sorted(enriched_positions, key=lambda x: abs(x.get('market_value', 0)), reverse=True)
                 
                 # Show top 3 positions
                 for i, position in enumerate(sorted_positions[:3]):
-                    ticker = position.get('market_ticker', 'Unknown')
-                    quantity = position.get('position', 0)
-                    position_value = abs(quantity) / 100.0  # Convert cents to dollars
+                    ticker = position.get('ticker', 'Unknown')
+                    market_value = abs(position.get('market_value', 0)) / 100.0  # Convert cents to dollars
+                    quantity = position.get('quantity', 0)
                     
                     # Determine position direction
                     direction = "📈" if quantity > 0 else "📉"
                     
-                    st.sidebar.markdown(f"{direction} {ticker}: ${position_value:.2f}")
+                    st.sidebar.markdown(f"{direction} {ticker}: ${market_value:.2f}")
                 
-                if len(positions) > 3:
-                    st.sidebar.markdown(f"... and {len(positions) - 3} more positions")
+                if len(enriched_positions) > 3:
+                    st.sidebar.markdown(f"... and {len(enriched_positions) - 3} more positions")
             
             # Refresh button for portfolio data
             if st.sidebar.button("🔄 Refresh Portfolio", key="refresh_portfolio"):
@@ -801,6 +801,16 @@ class MarketDashboard:
         st.info("🔄 Switching back to standard screening with manual criteria...")
         self._refresh_markets()
     
+    def _render_tabbed_content(self):
+        """Render main content with tabs."""
+        tab1, tab2 = st.tabs(["🎯 Market Screening", "💼 Portfolio Overview"])
+        
+        with tab1:
+            self._render_main_content()
+        
+        with tab2:
+            self._render_portfolio_tab()
+    
     def _render_main_content(self):
         """Render main dashboard content."""
         # Summary metrics
@@ -964,8 +974,8 @@ class MarketDashboard:
             market = result.market
             event = result.event
             
-            # Create event title
-            event_title = event.title[:30] + "..." if event and len(event.title) > 30 else (event.title if event else "N/A")
+            # Create event title - this should always be present
+            event_title = event.title
             
             # Use series ticker (event ticker) for the URL
             series_ticker = event.series_ticker
@@ -979,8 +989,8 @@ class MarketDashboard:
                 'Event': event_title,
                 'Series Ticker': series_ticker,
                 'Market Ticker': market.ticker,
-                'Market Title': market.title[:40] + "..." if len(market.title) > 40 else market.title,
-                'Category': event.category if event else "N/A",
+                'Market Title': market.title,
+                'Category': event.category or "Unknown",
                 'Score': f"{result.score:.2f}",
                 'Status': "✅ Pass" if result.score > 0 else "❌ Fail",
                 'Total Volume': f"{market.volume:,}" if market.volume else "0",
@@ -1142,8 +1152,8 @@ class MarketDashboard:
         # Create a selectbox for market selection
         market_options = {}
         for r in st.session_state.screening_results:
-            event_info = f" ({r.event.title[:20]}...)" if r.event else ""
-            key = f"{r.market.ticker} - {r.market.title[:25]}...{event_info}"
+            event_info = f" ({r.event.title})"
+            key = f"{r.market.ticker} - {r.market.title}{event_info}"
             market_options[key] = r
         
         # Find the default selection based on clicked row
@@ -1269,6 +1279,349 @@ class MarketDashboard:
         except Exception as e:
             st.error(f"Failed to refresh events: {e}")
             logger.error(f"Failed to refresh events: {e}")
+    
+    def _render_portfolio_tab(self):
+        """Render comprehensive portfolio overview tab."""
+        st.header("💼 Portfolio Overview")
+        
+        try:
+            # Get portfolio metrics using shared method
+            with st.spinner("Loading portfolio data..."):
+                portfolio_metrics = self.kalshi_client.get_portfolio_metrics()
+            
+            if portfolio_metrics is None:
+                st.error("❌ Unable to load portfolio data. Please check your API credentials.")
+                return
+            
+            # Extract metrics from shared method
+            cash_balance = portfolio_metrics.get('cash_balance', 0)
+            total_positions = portfolio_metrics.get('total_positions', 0)
+            total_market_value = portfolio_metrics.get('total_market_value', 0)
+            total_unrealized_pnl = portfolio_metrics.get('total_unrealized_pnl', 0)
+            total_portfolio_value = portfolio_metrics.get('total_portfolio_value', 0)
+            enriched_positions = portfolio_metrics.get('enriched_positions', [])
+            
+            # Portfolio Summary Section
+            st.subheader("📊 Portfolio Summary")
+            
+            # Display key metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Cash Balance", f"${cash_balance:.2f}")
+            
+            with col2:
+                st.metric("Total Positions", total_positions)
+            
+            with col3:
+                st.metric(
+                    "Market Value", 
+                    f"${total_market_value:.2f}",
+                    delta=f"${total_unrealized_pnl:.2f}" if total_unrealized_pnl != 0 else None,
+                    delta_color="normal" if total_unrealized_pnl >= 0 else "inverse"
+                )
+            
+            with col4:
+                st.metric("Total Portfolio", f"${total_portfolio_value:.2f}")
+            
+            if not enriched_positions:
+                st.info("📭 No positions found in your portfolio.")
+                return
+            
+            # Position Analysis
+            st.subheader("📈 Position Analysis")
+            
+            # Create tabs for different views
+            pos_tab1, pos_tab2, pos_tab3 = st.tabs(["📋 All Positions", "🏆 Winners & Losers", "📊 Analytics"])
+            
+            with pos_tab1:
+                self._render_positions_table(enriched_positions)
+            
+            with pos_tab2:
+                self._render_winners_losers(enriched_positions)
+            
+            with pos_tab3:
+                self._render_portfolio_analytics(enriched_positions, portfolio_metrics)
+                
+        except Exception as e:
+            st.error(f"❌ Error loading portfolio data: {e}")
+            logger.error(f"Portfolio tab error: {e}")
+    
+    def _render_positions_table(self, enriched_positions):
+        """Render detailed positions table."""
+        st.markdown("### 📋 Current Positions")
+        
+        # Filters
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            show_closed_markets = st.checkbox("Include closed markets", value=False)
+        
+        with col2:
+            min_position_value = st.number_input("Min position value ($)", min_value=0.0, value=0.0, step=1.0)
+        
+        with col3:
+            search_term = st.text_input("Search positions", placeholder="Search by ticker or event...")
+        
+        # Filter positions
+        filtered_positions = enriched_positions
+        
+        if not show_closed_markets:
+            filtered_positions = [
+                pos for pos in filtered_positions 
+                if pos.get('market') and pos['market'].status == 'active'
+            ]
+        
+        if min_position_value > 0:
+            filtered_positions = [
+                pos for pos in filtered_positions 
+                if abs(pos.get('market_value', 0)) / 100.0 >= min_position_value
+            ]
+        
+        if search_term:
+            search_lower = search_term.lower()
+            filtered_positions = [
+                pos for pos in filtered_positions
+                if (search_lower in pos.get('ticker', '').lower() or
+                    (pos.get('event') and search_lower in pos['event'].title.lower()) or
+                    (pos.get('market') and search_lower in pos['market'].title.lower()))
+            ]
+        
+        if not filtered_positions:
+            st.info("No positions match the current filters.")
+            return
+        
+        # Create positions DataFrame
+        positions_data = []
+        for pos in filtered_positions:
+            market = pos.get('market')
+            event = pos.get('event')
+            
+            quantity = pos.get('quantity', 0)
+            market_value = pos.get('market_value', 0) / 100.0
+            unrealized_pnl = pos.get('unrealized_pnl', 0) / 100.0
+            
+            # Determine position direction and side
+            if quantity > 0:
+                side = "YES"
+                direction = "📈"
+                shares = quantity
+            else:
+                side = "NO" 
+                direction = "📉"
+                shares = abs(quantity)
+            
+            # Market info - these should always be present
+            market_title = market.title
+            event_title = event.title
+            
+            # Current market price
+            if market:
+                if side == "YES":
+                    current_price = (market.yes_bid + market.yes_ask) / 2 if market.yes_bid and market.yes_ask else market.last_price
+                else:
+                    current_price = (market.no_bid + market.no_ask) / 2 if market.no_bid and market.no_ask else (1.0 - market.last_price if market.last_price else None)
+            else:
+                current_price = None
+            
+            # Status
+            status = market.status if market else "Unknown"
+            status_emoji = {"active": "🟢", "closed": "🔴", "settled": "✅"}.get(status, "⚪")
+            
+            # Days to close
+            days_to_close = market.days_to_close if market else "N/A"
+            
+            positions_data.append({
+                'Ticker': pos.get('ticker', 'N/A'),
+                'Event': event_title,
+                'Market': market_title,
+                'Side': f"{direction} {side}",
+                'Shares': f"{shares:,}",
+                'Market Value': f"${market_value:.2f}",
+                'Unrealized P&L': f"${unrealized_pnl:+.2f}",
+                'Current Price': f"{current_price:.2f}" if current_price else "N/A",
+                'Status': f"{status_emoji} {status.title()}",
+                'Days to Close': days_to_close,
+                'Kalshi Link': f"https://kalshi.com/events/{market.event_ticker}"
+            })
+        
+        df = pd.DataFrame(positions_data)
+        
+        # Display table
+        st.data_editor(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            disabled=True,
+            column_config={
+                "Kalshi Link": st.column_config.LinkColumn(
+                    "Kalshi Link",
+                    help="View market on Kalshi",
+                    display_text="🔗 View"
+                ),
+                "Market Value": st.column_config.TextColumn(
+                    "Market Value",
+                    help="Current market value of position"
+                ),
+                "Unrealized P&L": st.column_config.TextColumn(
+                    "Unrealized P&L",
+                    help="Unrealized profit/loss"
+                ),
+                "Current Price": st.column_config.TextColumn(
+                    "Current Price",
+                    help="Current market price"
+                )
+            }
+        )
+        
+        st.caption(f"Showing {len(filtered_positions)} positions")
+    
+    def _render_winners_losers(self, enriched_positions):
+        """Render winners and losers analysis."""
+        st.markdown("### 🏆 Winners & Losers")
+        
+        if not enriched_positions:
+            st.info("No positions to analyze.")
+            return
+        
+        # Sort by unrealized P&L
+        sorted_positions = sorted(
+            enriched_positions, 
+            key=lambda x: x.get('unrealized_pnl', 0), 
+            reverse=True
+        )
+        
+        # Split into winners and losers
+        winners = [pos for pos in sorted_positions if pos.get('unrealized_pnl', 0) > 0]
+        losers = [pos for pos in sorted_positions if pos.get('unrealized_pnl', 0) < 0]
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### 🎉 Top Winners")
+            if winners:
+                for i, pos in enumerate(winners[:5]):
+                    market = pos.get('market')
+                    event = pos.get('event')
+                    pnl = pos.get('unrealized_pnl', 0) / 100.0
+                    
+                    event_name = event.title
+                    
+                    st.success(f"**{pos.get('ticker', 'N/A')}** - {event_name}")
+                    st.markdown(f"💰 **+${pnl:.2f}** unrealized gain")
+                    if i < len(winners) - 1:
+                        st.markdown("---")
+            else:
+                st.info("No winning positions yet.")
+        
+        with col2:
+            st.markdown("#### 📉 Top Losers")
+            if losers:
+                for i, pos in enumerate(losers[:5]):
+                    market = pos.get('market')
+                    event = pos.get('event')
+                    pnl = pos.get('unrealized_pnl', 0) / 100.0
+                    
+                    event_name = event.title
+                    
+                    st.error(f"**{pos.get('ticker', 'N/A')}** - {event_name}")
+                    st.markdown(f"💸 **${pnl:.2f}** unrealized loss")
+                    if i < len(losers) - 1:
+                        st.markdown("---")
+            else:
+                st.info("No losing positions.")
+    
+    def _render_portfolio_analytics(self, enriched_positions, portfolio_metrics):
+        """Render portfolio analytics and charts."""
+        st.markdown("### 📊 Portfolio Analytics")
+        
+        if not enriched_positions:
+            st.info("No positions to analyze.")
+            return
+        
+        # Portfolio composition by category
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### 📂 Portfolio by Category")
+            category_values = {}
+            for pos in enriched_positions:
+                event = pos.get('event')
+                if event and event.category:
+                    category = event.category
+                    market_value = abs(pos.get('market_value', 0)) / 100.0
+                    category_values[category] = category_values.get(category, 0) + market_value
+            
+            if category_values:
+                fig = px.pie(
+                    values=list(category_values.values()),
+                    names=list(category_values.keys()),
+                    title="Position Value by Category"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No category data available.")
+        
+        with col2:
+            st.markdown("#### 💰 P&L Distribution")
+            pnl_data = []
+            labels = []
+            
+            for pos in enriched_positions:
+                pnl = pos.get('unrealized_pnl', 0) / 100.0
+                if pnl != 0:
+                    pnl_data.append(pnl)
+                    ticker = pos.get('ticker', 'Unknown')
+                    labels.append(f"{ticker}: ${pnl:+.2f}")
+            
+            if pnl_data:
+                fig = go.Figure()
+                colors = ['green' if x > 0 else 'red' for x in pnl_data]
+                
+                fig.add_trace(go.Bar(
+                    x=labels[:10],  # Show top 10
+                    y=pnl_data[:10],
+                    marker_color=colors[:10],
+                    text=[f"${x:+.2f}" for x in pnl_data[:10]],
+                    textposition='auto',
+                ))
+                
+                fig.update_layout(
+                    title="Unrealized P&L by Position (Top 10)",
+                    xaxis_title="Position",
+                    yaxis_title="P&L ($)",
+                    showlegend=False
+                )
+                
+                fig.update_xaxis(tickangle=45)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No P&L data to display.")
+        
+        # Portfolio metrics summary
+        st.markdown("#### 📈 Portfolio Metrics")
+        
+        # Use pre-calculated metrics from shared method
+        total_unrealized = portfolio_metrics.get('total_unrealized_pnl', 0)
+        total_market_value = portfolio_metrics.get('total_market_value', 0)
+        winning_positions = portfolio_metrics.get('winning_positions', 0)
+        losing_positions = portfolio_metrics.get('losing_positions', 0)
+        win_rate = portfolio_metrics.get('win_rate', 0)
+        portfolio_return = portfolio_metrics.get('portfolio_return', 0)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total Unrealized P&L", f"${total_unrealized:+.2f}")
+        
+        with col2:
+            st.metric("Win Rate", f"{win_rate:.1f}%")
+        
+        with col3:
+            st.metric("Winners", winning_positions, delta=f"vs {losing_positions} losers")
+        
+        with col4:
+            st.metric("Portfolio Return", f"{portfolio_return:+.2f}%")
 
 def main():
     """Main function to run the dashboard."""
