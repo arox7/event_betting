@@ -8,7 +8,10 @@ from config import Config
 from kalshi_client import KalshiAPIClient
 
 # Configure logging
-logging.basicConfig(level=logging.WARNING)  # Reduce log noise
+logging.basicConfig(
+    level=logging.WARNING,  # Reduce log noise
+    format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 def convert_pydantic_to_dict(obj):

@@ -2,6 +2,7 @@
 Kalshi API client using the official kalshi-python SDK.
 """
 import logging
+from multiprocessing import process
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 import kalshi_python
@@ -12,7 +13,8 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from config import Config
-from models import Market, Event
+from models import Market, Event, MarketPosition
+from pprint import pprint
 
 
 logger = logging.getLogger(__name__)
@@ -135,28 +137,31 @@ class KalshiAPIClient:
             logger.error(f"Failed to create event from market data: {e}")
             return None
     
-    def _preprocess_market_data(self, data):
-        """Recursively preprocess market data to handle known API inconsistencies."""
-        if isinstance(data, dict):
-            # Create a copy to avoid modifying the original
-            cleaned = data.copy()
-            
-            # Handle status field - map non-standard values to valid enum values
-            status = cleaned.get('status')
-            valid_statuses = {'initialized', 'active', 'closed', 'settled', 'determined'}
-            if status and status not in valid_statuses:
-                logger.info(f"Converting non-standard status '{status}' to 'closed' for ticker: {cleaned.get('ticker', 'unknown')}")
-                cleaned['status'] = 'closed'
-            
-            # Recursively clean nested structures
-            for key, value in cleaned.items():
-                cleaned[key] = self._preprocess_market_data(value)
-            
-            return cleaned
-        elif isinstance(data, list):
-            return [self._preprocess_market_data(item) for item in data]
-        else:
-            return data
+    def _preprocess_event_data(self, data, status: Optional[str] = None):
+        """Recursively preprocess event data to handle known API inconsistencies."""
+        markets = data.get('markets', [])
+        cleaned = data.copy()
+        markets_to_keep = []
+        for market in markets:
+            processed_market = self._is_market_valid(market, status)
+            if processed_market:
+                markets_to_keep.append(market)
+        cleaned['markets'] = markets_to_keep
+        return cleaned
+
+    def _is_market_valid(self, data, status: Optional[str] = None):
+        market_status = data.get('status')
+        valid_statuses = {'initialized', 'active', 'closed', 'settled', 'determined'}
+        if market_status not in valid_statuses:
+            return False
+
+        if status is not None:
+            if status == 'open' and market_status not in ["active", "open"]:
+                return False
+            elif status != 'open' and market_status != status:
+                return False
+        
+        return True
     
     def get_markets(self, limit: int = 100, status: Optional[str] = None) -> List[Market]:
         """Fetch markets from Kalshi API."""
@@ -174,9 +179,8 @@ class KalshiAPIClient:
                     market_dict = market_data.to_dict()
                     
                     # Preprocess market data to handle known issues
-                    cleaned_market_dict = self._preprocess_market_data(market_dict)
-                    
-                    markets.append(Market.model_validate(cleaned_market_dict, strict=False))
+                    if self._is_market_valid(market_dict):
+                        markets.append(Market.model_validate(market_dict, strict=False))
                 except Exception as e:
                     ticker = getattr(market_data, 'ticker', 'unknown')
                     logger.warning(f"Skipping invalid market {ticker}: {e}")
@@ -195,8 +199,6 @@ class KalshiAPIClient:
             return []
             
         try:
-            import requests
-            
             all_events = []
             cursor = None
             
@@ -227,7 +229,9 @@ class KalshiAPIClient:
                 for event_raw in data.get('events', []):
                     try:
                         # Preprocess to handle status validation issues
-                        cleaned_event_dict = self._preprocess_market_data(event_raw)
+                        cleaned_event_dict = self._preprocess_event_data(event_raw, status)
+                        if len(cleaned_event_dict) == 0:
+                            continue
                         event = Event.model_validate(cleaned_event_dict, strict=False)
                         all_events.append(event)
                     except Exception as e:
@@ -255,18 +259,33 @@ class KalshiAPIClient:
         return headers
     
     def get_market_by_ticker(self, ticker: str) -> Optional[Market]:
-        """Fetch a specific market by ticker."""
+        """Fetch a specific market by ticker using direct HTTP requests."""
         if not self.client:
             logger.error("Client not initialized")
             return None
             
         try:
-            response = self.client.get_market(ticker=ticker)
-            if response.market:
-                market_dict = response.market.to_dict()
-                market = Market.model_validate(market_dict)
+            # Make direct API call
+            url = f"{self.client.api_client.configuration.host}/markets/{ticker}"
+            headers = self._get_auth_headers()
+            
+            response = requests.get(url, headers=headers)
+            
+            if response.status_code != 200:
+                logger.error(f"API call failed: {response.status_code} - {response.text}")
+                return None
+            
+            data = response.json()
+            
+            if 'market' in data and data['market']:
+                market_dict = data['market']
+                # Do this to fit the model schema validation
+                if market_dict.get("status") == "finalized":
+                    market_dict["status"] = "settled"
+                market = Market.model_validate(market_dict, strict=False)
                 return market
             return None
+            
         except Exception as e:
             logger.error(f"Failed to fetch market {ticker}: {e}")
             return None
@@ -293,7 +312,7 @@ class KalshiAPIClient:
             logger.error(f"Failed to fetch orderbook for {ticker}: {e}")
             return None
     
-    def get_balance(self) -> Optional[float]:
+    def get_balance_dollars(self) -> Optional[float]:
         """Get account balance in dollars using raw HTTP requests."""
         if not self.config.KALSHI_API_KEY_ID or not self._private_key:
             logger.error("API credentials not properly configured")
@@ -309,17 +328,21 @@ class KalshiAPIClient:
                 return None
             
             data = response.json()
-            balance_cents = data.get('balance', 0)
-            balance = balance_cents / 100.0  # Convert cents to dollars
+            balance_cents = data['balance']
+            balance_dollars = balance_cents / 100.0  # Convert cents to dollars
             
-            return balance
+            return balance_dollars
             
         except Exception as e:
             logger.error(f"Failed to get balance: {e}")
             return None
     
-    def get_unsettled_positions(self) -> Optional[Dict[str, Any]]:
-        """Get unsettled portfolio positions using raw HTTP requests with pagination."""
+    def get_balance(self) -> Optional[float]:
+        """Backward compatibility alias for get_balance_dollars()."""
+        return self.get_balance_dollars()
+    
+    def get_all_positions(self) -> Optional[Dict[str, Any]]:
+        """Get all portfolio positions using raw HTTP requests with pagination."""
         if not self.config.KALSHI_API_KEY_ID or not self._private_key:
             logger.error("API credentials not properly configured")
             return None
@@ -333,7 +356,8 @@ class KalshiAPIClient:
                 # Build request parameters
                 params = {
                     'limit': 200,
-                    'settlement_status': 'unsettled'
+                    'settlement_status': 'all',
+                    'count_filter': "position,total_traded,resting_order_count"
                 }
                 if cursor:
                     params['cursor'] = cursor
@@ -364,7 +388,6 @@ class KalshiAPIClient:
             active_positions = [pos for pos in all_market_positions if pos.get('position', 0) != 0]
             
             result = {
-                'positions': active_positions,  # Only positions with actual holdings
                 'active_positions': active_positions,  # Only positions with actual holdings
                 'all_market_positions': all_market_positions,  # All market positions from API
                 'all_event_positions': all_event_positions,    # Event-level position data
@@ -425,15 +448,16 @@ class KalshiAPIClient:
             logger.error(f"Failed to get settled positions: {e}")
             return None
     
+    
     def get_enriched_positions(self) -> Optional[List[Dict[str, Any]]]:
         """Get positions enriched with market and event data."""
         try:
             # Get positions
-            positions_data = self.get_unsettled_positions()
+            positions_data = self.get_all_positions()
             if not positions_data:
                 return None
             
-            positions = positions_data.get('positions', [])
+            positions = positions_data.get('all_market_positions', [])
             if not positions:
                 return []
             
@@ -486,29 +510,28 @@ class KalshiAPIClient:
                 market_info = market_lookup.get(ticker)
                 if market_info:
                     enriched_position = {
-                        'position': position,
                         'market': market_info['market'],
                         'event': market_info['event'],
                         'ticker': ticker,
-                        'quantity': position.get('position', 0),
-                        'market_value': position.get('market_exposure', 0),  # Kalshi uses market_exposure
-                        'total_cost': position.get('total_cost', 0),
+                        'quantity': position['position'],
+                        'position': position['position'],
+                        'market_value': position['market_exposure'],  # Kalshi uses market_exposure
+                        'total_cost': position['total_traded'],  # Use total_traded as cost basis
                         'unrealized_pnl': 0,  # Calculate this based on current market price vs cost
-                        'realized_pnl': position.get('realized_pnl', 0)
+                        'realized_pnl': position['realized_pnl']
                     }
                     enriched_positions.append(enriched_position)
                 else:
                     # Position without matching market (might be settled/closed)
                     enriched_position = {
-                        'position': position,
                         'market': None,
                         'event': None,
                         'ticker': ticker,
-                        'quantity': position.get('position', 0),
-                        'market_value': position.get('market_exposure', 0),  # Kalshi uses market_exposure
-                        'total_cost': position.get('total_cost', 0),
-                        'unrealized_pnl': 0,  # Can't calculate without market data
-                        'realized_pnl': position.get('realized_pnl', 0)
+                        'quantity': position['position'],
+                        'position': position['position'],
+                        'market_value': position['market_exposure'],  # Kalshi uses market_exposure
+                        'total_cost': position['total_traded'],  # Use total_traded as cost basis
+                        'realized_pnl': position['realized_pnl']
                     }
                     enriched_positions.append(enriched_position)
             
@@ -550,243 +573,133 @@ class KalshiAPIClient:
             logger.error(f"Failed to get fills: {e}")
             return None
     
-    def get_portfolio_summary(self) -> Optional[Dict[str, Any]]:
-        """Get comprehensive portfolio summary including positions and PnL."""
-        try:
-            # Get cash balance
-            cash_balance = self.get_balance()
-            if cash_balance is None:
-                return None
-            
-            # Get positions
-            positions_data = self.get_unsettled_positions()
-            if positions_data is None:
-                return None
-            
-            positions = positions_data.get('positions', [])
-            
-            # Calculate position values
-            total_position_value = 0
-            total_unrealized_pnl = 0
-            position_count = len(positions)
-            
-            for position in positions:
-                # Position value should use market_exposure (already in cents from API)
-                market_exposure_cents = position.get('market_exposure', 0)
-                position_value = abs(market_exposure_cents) / 100.0  # Convert cents to dollars
-                total_position_value += position_value
+    def filter_market_positions_by_date(self, market_positions: List[Dict[str, Any]], start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """Filter market positions by date range based on last_updated_ts."""
+        if not start_date and not end_date:
+            return market_positions
+        
+        filtered_positions = []
+        for pos in market_positions:
+            try:
+                # Parse the timestamp
+                last_updated_str = pos['last_updated_ts']
+                if last_updated_str.endswith('Z'):
+                    last_updated_str = last_updated_str[:-1] + '+00:00'
                 
-                # Unrealized PnL (if available in the response)
-                unrealized_pnl_cents = position.get('unrealized_pnl', 0)
-                total_unrealized_pnl += unrealized_pnl_cents / 100.0
-            
-            total_balance = cash_balance + total_position_value
-            
-            return {
-                'cash_balance': cash_balance,
-                'total_position_value': total_position_value,
-                'total_balance': total_balance,
-                'unrealized_pnl': total_unrealized_pnl,
-                'position_count': position_count,
-                'positions': positions
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to get portfolio summary: {e}")
-            return None
-    
-    def get_portfolio_metrics(self) -> Optional[Dict[str, Any]]:
-        """Get comprehensive portfolio metrics including cash, positions, and P&L."""
+                pos_datetime = datetime.fromisoformat(last_updated_str)
+                
+                # Filter by date range (compare dates, not datetime objects)
+                if start_date:
+                    # Convert start_date to date if it's a datetime
+                    start_date_only = start_date.date() if hasattr(start_date, 'date') else start_date
+                    if pos_datetime.date() < start_date_only:
+                        continue
+                if end_date:
+                    # Convert end_date to date if it's a datetime
+                    end_date_only = end_date.date() if hasattr(end_date, 'date') else end_date
+                    if pos_datetime.date() > end_date_only:
+                        continue
+                
+                filtered_positions.append(pos)
+            except Exception as e:
+                logger.warning(f"Error parsing date for position {pos.get('ticker', 'Unknown')}: {e}")
+                continue
+        
+        return filtered_positions
+
+    def get_portfolio_metrics(self, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+        """Get comprehensive portfolio metrics including cash, positions, and P&L with optional date filtering."""
         try:
-            # Get cash balance
-            cash_balance = self.get_balance()
-            if cash_balance is None:
+            # Get cash balance (in dollars)
+            cash_balance_dollars = self.get_balance_dollars()
+            if cash_balance_dollars is None:
                 return None
             
-            # Get enriched positions for detailed calculations
+            # Get all positions data (includes both active and market positions)
+            all_positions_data = self.get_all_positions()
+            if all_positions_data is None:
+                return None
+            
+            # Get enriched positions for detailed calculations (active positions only)
             enriched_positions = self.get_enriched_positions()
             if enriched_positions is None:
-                return None
+                enriched_positions = []
             
-            # Calculate metrics from enriched positions
-            total_positions = len(enriched_positions)
-            total_market_value = sum(abs(pos.get('market_value', 0)) for pos in enriched_positions) / 100.0
-            total_unrealized_pnl = sum(pos.get('unrealized_pnl', 0) for pos in enriched_positions) / 100.0
-            total_realized_pnl = sum(pos.get('realized_pnl', 0) for pos in enriched_positions) / 100.0
+            # Extract market positions (all positions including closed ones)
+            all_market_positions = all_positions_data['all_market_positions']
+            
+            # Apply date filtering to market positions if dates are provided
+            if start_date or end_date:
+                filtered_market_positions = self.filter_market_positions_by_date(all_market_positions, start_date, end_date)
+            else:
+                filtered_market_positions = all_market_positions
+            
+            # Calculate metrics from enriched positions (active positions only)
+            total_active_positions = len(enriched_positions)
+            
+            # Market value calculations (convert from cents to dollars)
+            total_market_value_dollars = sum(abs(pos['market_value']) for pos in enriched_positions) / 100.0
+            total_unrealized_pnl_dollars = sum(pos['unrealized_pnl'] for pos in enriched_positions) / 100.0
+            
+            # Calculate realized P&L from filtered market positions, accounting for fees
+            total_realized_pnl_cents = 0
+            total_fees_paid_cents = 0
+            
+            for pos in filtered_market_positions:
+                realized_pnl_cents = pos['realized_pnl']  # Already in cents
+                fees_paid_cents = pos['fees_paid']  # Already in cents
+                total_realized_pnl_cents += realized_pnl_cents
+                total_fees_paid_cents += fees_paid_cents
+            
+            # Net realized P&L after fees (convert to dollars)
+            total_realized_pnl_dollars = (total_realized_pnl_cents - total_fees_paid_cents) / 100.0
+            total_fees_paid_dollars = total_fees_paid_cents / 100.0
             
             # Calculate portfolio totals
-            total_portfolio_value = cash_balance + total_market_value
+            total_portfolio_value_dollars = cash_balance_dollars + total_market_value_dollars
             
-            # Calculate win/loss metrics
-            winning_positions = len([pos for pos in enriched_positions if pos.get('unrealized_pnl', 0) > 0])
-            losing_positions = len([pos for pos in enriched_positions if pos.get('unrealized_pnl', 0) < 0])
-            win_rate = (winning_positions / total_positions) * 100 if total_positions > 0 else 0
-            portfolio_return = (total_unrealized_pnl / total_market_value) * 100 if total_market_value > 0 else 0
+            # Calculate win/loss metrics from active positions
+            winning_positions = len([pos for pos in enriched_positions if pos['unrealized_pnl'] > 0])
+            losing_positions = len([pos for pos in enriched_positions if pos['unrealized_pnl'] < 0])
+            win_rate = (winning_positions / total_active_positions) * 100 if total_active_positions > 0 else 0
+            portfolio_return = (total_unrealized_pnl_dollars / total_market_value_dollars) * 100 if total_market_value_dollars > 0 else 0
+            
+            # Calculate closed positions from filtered data
+            closed_positions = [pos for pos in filtered_market_positions if pos['position'] == 0 and pos['total_traded'] > 0]
             
             return {
-                'cash_balance': cash_balance,
-                'total_market_value': total_market_value,
-                'total_portfolio_value': total_portfolio_value,
-                'total_unrealized_pnl': total_unrealized_pnl,
-                'total_realized_pnl': total_realized_pnl,
-                'total_positions': total_positions,
+                'cash_balance': cash_balance_dollars,  # In dollars
+                'total_market_value': total_market_value_dollars,  # In dollars
+                'total_portfolio_value': total_portfolio_value_dollars,  # In dollars
+                'total_unrealized_pnl': total_unrealized_pnl_dollars,  # In dollars
+                'total_realized_pnl': total_realized_pnl_dollars,  # In dollars (after fees)
+                'total_fees_paid': total_fees_paid_dollars,  # In dollars
+                'total_positions': total_active_positions,
                 'winning_positions': winning_positions,
                 'losing_positions': losing_positions,
                 'win_rate': win_rate,
                 'portfolio_return': portfolio_return,
-                'enriched_positions': enriched_positions
+                'enriched_positions': enriched_positions,
+                'market_positions': all_market_positions,  # All market positions (unfiltered)
+                'filtered_market_positions': filtered_market_positions,  # Date-filtered market positions
+                'closed_positions': closed_positions,  # Closed positions from filtered data
+                'total_filtered_positions': len(filtered_market_positions),
+                'total_closed_positions': len(closed_positions),
+                'date_range_start': start_date,
+                'date_range_end': end_date
             }
             
         except Exception as e:
             logger.error(f"Failed to get portfolio metrics: {e}")
             return None
-
-    def get_realized_pnl(self, days: int = 7) -> Optional[Dict[str, Any]]:
-        """Get realized P&L from closed positions over the specified period."""
-        try:
-            from datetime import datetime, timezone, timedelta
-            
-            # Get all positions to find closed ones
-            positions_data = self.get_unsettled_positions()
-            if positions_data is None:
-                return {'realized_pnl': 0, 'closed_positions': 0, 'total_cost': 0, 'total_proceeds': 0}
-            
-            positions = positions_data.get('positions', [])
-            cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
-            
-            total_realized_pnl = 0
-            closed_positions = []
-            total_cost = 0
-            total_proceeds = 0
-            
-            for position in positions:
-                # Check if position has realized P&L (indicates it was closed)
-                realized_pnl = position.get('realized_pnl', 0)
-                if realized_pnl != 0:
-                    # This position was closed and has realized P&L
-                    total_realized_pnl += realized_pnl / 100.0  # Convert cents to dollars
-                    
-                    # Track cost and proceeds for analysis
-                    total_cost_cents = position.get('total_cost', 0)
-                    market_exposure_cents = position.get('market_exposure', 0)
-                    
-                    total_cost += abs(total_cost_cents) / 100.0
-                    total_proceeds += abs(market_exposure_cents) / 100.0
-                    
-                    closed_positions.append({
-                        'ticker': position.get('ticker', 'Unknown'),
-                        'realized_pnl': realized_pnl / 100.0,
-                        'total_cost': total_cost_cents / 100.0,
-                        'market_exposure': market_exposure_cents / 100.0
-                    })
-            
-            return {
-                'realized_pnl': total_realized_pnl,
-                'closed_positions': len(closed_positions),
-                'total_cost': total_cost,
-                'total_proceeds': total_proceeds,
-                'closed_positions_details': closed_positions,
-                'period_days': days
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to get realized PnL: {e}")
-            return {'realized_pnl': 0, 'closed_positions': 0, 'total_cost': 0, 'total_proceeds': 0}
-
-    def get_recent_pnl(self, hours: int = 24) -> Optional[Dict[str, Any]]:
-        """Get realized P&L from recent trading activity."""
-        try:
-            from datetime import datetime, timezone, timedelta
-            
-            # Get recent fills to calculate realized PnL
-            fills_data = self.get_fills(limit=200)
-            if fills_data is None:
-                return {'realized_pnl': 0, 'trade_count': 0, 'trades': []}
-            
-            fills = fills_data.get('fills', [])
-            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
-            
-            recent_fills = []
-            total_realized_pnl = 0
-            
-            for fill in fills:
-                # fill is already a Fill object from the SDK, not a dict
-                if not fill.created_time:
-                    continue
-                    
-                try:
-                    if fill.created_time >= cutoff_time:
-                        recent_fills.append(fill)
-                        
-                        # Extract fill details - these are already the correct types
-                        ticker = fill.ticker
-                        side = fill.side  # 'yes' or 'no'
-                        count = fill.count or 0
-                        price = fill.price or 0  # in cents
-                        
-                        if not ticker or count == 0:
-                            continue
-                        
-                        # Calculate trade value in dollars
-                        trade_value = (count * price) / 100.0
-                        
-                        # Calculate realized P&L from trading activity
-                        # Buying costs money (negative P&L), selling generates revenue (positive P&L)
-                        if side == 'yes':
-                            # Bought Yes shares - this is a cost
-                            total_realized_pnl -= trade_value
-                        else:
-                            # Selling positions or buying No shares - treat as revenue
-                            total_realized_pnl += trade_value
-                            
-                except Exception as e:
-                    logger.warning(f"Failed to parse fill: {e}")
-                    continue
-            
-            # Calculate some basic stats
-            trade_volume = sum(((fill.count or 0) * (fill.price or 0)) / 100.0 for fill in recent_fills)
-            
-            return {
-                'realized_pnl': total_realized_pnl,
-                'trade_count': len(recent_fills),
-                'trade_volume': trade_volume,
-                'recent_fills': [fill.to_dict() for fill in recent_fills[:10]]  # Return last 10 fills for display
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to get recent PnL: {e}")
-            return {'realized_pnl': 0, 'trade_count': 0, 'trades': []}
-    
-    def get_all_positions(self) -> Optional[Dict[str, Any]]:
-        """Get all positions (both settled and unsettled) on dashboard startup."""
-        try:
-            # Get unsettled positions
-            unsettled_data = self.get_unsettled_positions()
-            
-            # Get settled positions
-            settled_data = self.get_settled_positions()
-            
-            result = {
-                'unsettled': unsettled_data,
-                'settled': settled_data,
-                'timestamp': datetime.now(timezone.utc)
-            }
-            
-            logger.info(f"Retrieved {len(unsettled_data.get('positions', []) if unsettled_data else [])} unsettled positions and {len(settled_data.get('all_settlements', []) if settled_data else [])} settled positions")
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Failed to get all positions: {e}")
-            return None
-
+  
     def health_check(self) -> bool:
         """Check if the API client is working properly."""
         try:
             if not self.client:
                 return False
             # Try to get balance as a simple health check
-            balance = self.get_balance()
+            balance = self.get_balance_dollars()
             return balance is not None
         except Exception as e:
             logger.error(f"Health check failed: {e}")

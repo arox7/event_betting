@@ -4,6 +4,8 @@ Gemini-powered bespoke market screening using natural language queries.
 import logging
 import re
 import ast
+import json
+import os
 from typing import List, Callable, Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
 import google.generativeai as genai
@@ -12,6 +14,32 @@ from models import Market, Event, ScreeningResult
 from config import Config
 
 logger = logging.getLogger(__name__)
+
+# Set up file logging for Gemini interactions
+def setup_gemini_logging():
+    """Set up file logging for Gemini API interactions."""
+    gemini_logger = logging.getLogger('gemini_interactions')
+    gemini_logger.setLevel(logging.WARNING)  # Only log warnings and errors
+    
+    # Create logs directory if it doesn't exist
+    os.makedirs('logs', exist_ok=True)
+    
+    # Create file handler
+    log_file = f"logs/gemini_interactions_{datetime.now().strftime('%Y%m%d')}.log"
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.INFO)
+    
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    
+    # Add handler to logger
+    gemini_logger.addHandler(file_handler)
+    
+    return gemini_logger
+
+# Initialize Gemini logger
+gemini_logger = setup_gemini_logging()
 
 class GeminiScreener:
     """Natural language to Python screening function converter and chat assistant using Gemini."""
@@ -33,6 +61,73 @@ class GeminiScreener:
     def is_available(self) -> bool:
         """Check if Gemini screening is available."""
         return self.model is not None
+    
+    def explain_screening_criteria(self, user_prompt: str, screening_code: str) -> Optional[str]:
+        """
+        Explain what criteria the AI used for screening based on the user prompt and generated code.
+        
+        Args:
+            user_prompt: Original user query
+            screening_code: Generated Python screening function code
+            
+        Returns:
+            Human-readable explanation of the criteria used, or None if generation fails
+        """
+        if not self.model:
+            logger.error("Gemini model not available")
+            return None
+        
+        try:
+            prompt = f"""
+You are an AI assistant that explains market screening criteria in simple terms.
+
+User Query: "{user_prompt}"
+
+Generated Screening Code:
+```python
+{screening_code}
+```
+
+Please analyze the screening code and explain in simple, human-readable terms what criteria were used to filter the markets. Be specific about:
+1. Volume requirements (if any)
+2. Spread requirements (if any) 
+3. Time-based filters (if any)
+4. Any other market characteristics that were filtered for
+
+Include other relevant criteria as well if there are any.
+Format your response as a clear, concise explanation that a trader would understand. Use bullet points if helpful.
+
+Example format:
+"The AI filtered for markets with:
+• Volume greater than 5000 shares in the last 24 hours
+• Spreads tighter than 5 cents (0.05)
+• Closing within the next 2 hours"
+
+Be specific about the exact values used in the code.
+"""
+
+            # Log the input (reduced verbosity)
+            gemini_logger.debug(f"EXPLAIN_CRITERIA - INPUT: {user_prompt[:50]}...")
+
+            response = self.model.generate_content(prompt)
+            
+            if response and response.text:
+                explanation = response.text.strip()
+                # Log the output (reduced verbosity)
+                gemini_logger.debug(f"EXPLAIN_CRITERIA - OUTPUT: {len(explanation)} chars")
+                return explanation
+            else:
+                gemini_logger.warning(f"EXPLAIN_CRITERIA - EMPTY RESPONSE:")
+                gemini_logger.warning(f"Response object: {response}")
+                logger.warning("Empty response from Gemini for criteria explanation")
+                return None
+                
+        except Exception as e:
+            gemini_logger.error(f"EXPLAIN_CRITERIA - ERROR:")
+            gemini_logger.error(f"Error: {str(e)}")
+            gemini_logger.error(f"Error type: {type(e)}")
+            logger.error(f"Error generating criteria explanation: {e}")
+            return None
     
     def generate_screening_function(self, user_prompt: str) -> Optional[str]:
         """
@@ -56,10 +151,22 @@ class GeminiScreener:
 
 USER REQUEST: {user_prompt}
 
-Generate the screening function:"""
+Please generate a Python screening function based on the above request. The function should be named `screen_markets` and take a list of Market objects as input."""
         
         try:
+            # Log the input (reduced verbosity)
+            gemini_logger.debug(f"GENERATE_SCREENING - INPUT: {user_prompt[:50]}...")
+            
+            # Validate user prompt
+            if not user_prompt or not user_prompt.strip():
+                gemini_logger.error("User prompt is empty or None")
+                logger.error("User prompt is empty or None")
+                return None
+            
             response = self.model.generate_content(full_prompt)
+            
+            # Log the raw response (reduced verbosity)
+            gemini_logger.debug(f"GENERATE_SCREENING - RAW RESPONSE: {len(response.text)} chars")
             
             if response.text:
                 # Extract Python code from response
@@ -67,49 +174,108 @@ Generate the screening function:"""
                 if code:
                     # Validate the generated code
                     if self._validate_screening_function(code):
+                        gemini_logger.debug(f"GENERATE_SCREENING - SUCCESS: {len(code)} chars")
                         return code
                     else:
+                        gemini_logger.warning(f"GENERATE_SCREENING - VALIDATION FAILED:")
+                        gemini_logger.warning(f"Code that failed: {code}")
                         logger.error("Generated code failed validation")
                         return None
                 else:
+                    gemini_logger.warning(f"GENERATE_SCREENING - NO CODE EXTRACTED:")
+                    gemini_logger.warning(f"Response text: {response.text}")
                     logger.error("No valid Python code found in Gemini response")
                     return None
             else:
+                gemini_logger.error(f"GENERATE_SCREENING - EMPTY RESPONSE:")
+                gemini_logger.error(f"Response object: {response}")
                 logger.error("Empty response from Gemini")
                 return None
                 
         except Exception as e:
+            gemini_logger.error(f"GENERATE_SCREENING - ERROR:")
+            gemini_logger.error(f"Error: {str(e)}")
+            gemini_logger.error(f"Error type: {type(e)}")
             logger.error(f"Error generating screening function: {e}")
             return None
     
-    def execute_screening_function(self, code: str, markets_or_results, events: List[Event] = None) -> List[ScreeningResult]:
+    def execute_screening_function(self, code: str, markets: List[Market], events: List[Event]) -> List[ScreeningResult]:
         """
-        Safely execute the generated screening function.
+        Safely execute the generated screening function on markets with their events.
         
         Args:
             code: Python function code
-            markets_or_results: Either List[Market] (with events required) or List[ScreeningResult]
-            events: List of events (required if markets_or_results is List[Market], ignored otherwise)
+            markets: List of Market objects
+            events: List of Event objects (markets must belong to these events)
             
         Returns:
             List of screening results
         """
-        # Determine input type and convert to screening results if needed
-        if not markets_or_results:
+        if not markets or not events:
             return []
-            
-        # Check if we have ScreeningResult objects or Market objects
-        if hasattr(markets_or_results[0], 'market'):
-            # We have ScreeningResult objects - use them directly
-            screening_results = markets_or_results
-        else:
-            # We have Market objects - need to match with events
-            if events is None:
-                logger.error("Events list is required when passing Market objects")
-                return []
-            screening_results = self._create_screening_results_from_markets(markets_or_results, events)
         
-        return self._execute_screening_on_results(code, screening_results)
+        # Create market-to-event lookup for efficiency
+        market_to_event = {}
+        for event in events:
+            for market in event.markets:
+                market_to_event[market.ticker] = event
+        
+        return self._execute_screening_direct(code, markets, market_to_event)
+    
+    def _execute_screening_direct(self, code: str, markets: List[Market], market_to_event: Dict[str, Event]) -> List[ScreeningResult]:
+        """Execute screening function directly on markets without unnecessary conversions."""
+        try:
+            # Create safe execution environment
+            safe_globals = self._create_safe_execution_environment()
+            safe_locals = {}
+            
+            # Execute the code
+            exec(code, safe_globals, safe_locals)
+            
+            # Get the screening function
+            if 'screen_markets' not in safe_locals:
+                logger.error("Generated code does not contain 'screen_markets' function")
+                return []
+            
+            screen_function = safe_locals['screen_markets']
+            
+            # Execute screening directly on markets
+            results = []
+            for market in markets:
+                # Get the event for this market
+                event = market_to_event.get(market.ticker)
+                if not event:
+                    continue  # Skip markets without events
+                
+                try:
+                    # Call the screening function directly
+                    passes, reasons = screen_function(market, event)
+                    
+                    # Create screening result
+                    result = ScreeningResult(
+                        market=market,
+                        event=event,
+                        score=1.0 if passes else 0.0,
+                        reasons=reasons if isinstance(reasons, list) else [str(reasons)]
+                    )
+                    results.append(result)
+                    
+                except Exception as e:
+                    logger.warning(f"Error screening market {market.ticker}: {e}")
+                    # Create failed result
+                    failed_result = ScreeningResult(
+                        market=market,
+                        event=event,
+                        score=0.0,
+                        reasons=[f"Screening error: {str(e)}"]
+                    )
+                    results.append(failed_result)
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error executing screening function: {e}")
+            return []
     
     def _create_screening_results_from_markets(self, markets: List[Market], events: List[Event]) -> List[ScreeningResult]:
         """Create ScreeningResult objects from markets and events."""
@@ -320,8 +486,8 @@ class Market:
     no_bid: Optional[float]                  # Current No bid price (cents)
     no_ask: Optional[float]                  # Current No ask price (cents)
     last_price: Optional[float]              # Last traded price (cents)
-    volume: Optional[int]                    # Total volume
-    volume_24h: Optional[int]                # 24h volume
+    volume: Optional[int]                    # Total volume (in # of contracts)
+    volume_24h: Optional[int]                # 24h volume (in # of contracts)
     result: Optional[str]                    # Settlement result: 'yes', 'no', or ''
     can_close_early: Optional[bool]          # Can market close early
     cap_count: Optional[int]                 # Count data
@@ -341,6 +507,15 @@ class Event:
     status: Optional[str]                    # Event status
     markets: List[Market]                    # Markets in this event
     category: Optional[str]                  # Event category (from our model)
+
+PRE-IMPORTED MODULES:
+The following modules are already imported and available in the execution environment:
+- datetime (datetime, timezone, timedelta)
+- math
+- re
+- All standard Python built-ins
+
+DO NOT include any import statements in your code. All required modules are pre-imported.
 
 REQUIRED FUNCTION FORMAT:
 You must generate a function with this exact signature:

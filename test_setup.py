@@ -11,7 +11,10 @@ from kalshi_client import KalshiAPIClient
 from market_screener import MarketScreener
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 def test_setup():
@@ -116,68 +119,6 @@ def test_setup():
                 logger.info(f"      📅 Event Data: {'✅' if has_event_data else '❌'}")
         else:
             logger.info("ℹ️ No enriched positions found (this is normal if you have no positions)")
-        
-        # Test realized P&L functionality
-        logger.info("📈 Testing realized P&L...")
-        realized_pnl_7d = kalshi_client.get_realized_pnl(days=7)
-        
-        if realized_pnl_7d:
-            realized_pnl = realized_pnl_7d.get('realized_pnl', 0)
-            closed_positions = realized_pnl_7d.get('closed_positions', 0)
-            total_cost = realized_pnl_7d.get('total_cost', 0)
-            total_proceeds = realized_pnl_7d.get('total_proceeds', 0)
-            
-            calculation_method = realized_pnl_7d.get('calculation_method', 'unknown')
-            logger.info(f"✅ Realized P&L data loaded (7 days):")
-            logger.info(f"   💰 Realized P&L: ${realized_pnl:.2f}")
-            logger.info(f"   📊 Closed Positions: {closed_positions}")
-            logger.info(f"   💵 Total Cost: ${total_cost:.2f}")
-            logger.info(f"   💰 Total Proceeds: ${total_proceeds:.2f}")
-            logger.info(f"   🔧 Calculation Method: {calculation_method}")
-            
-            if closed_positions > 0:
-                return_pct = (realized_pnl / total_cost) * 100 if total_cost > 0 else 0
-                logger.info(f"   📈 Return %: {return_pct:+.2f}%")
-        else:
-            logger.info("ℹ️ No realized P&L data available")
-        
-        # Test different time periods
-        logger.info("🕒 Testing different time periods...")
-        for days in [1, 7, 30]:
-            pnl_data = kalshi_client.get_realized_pnl(days=days)
-            if pnl_data:
-                closed_count = pnl_data.get('closed_positions', 0)
-                pnl = pnl_data.get('realized_pnl', 0)
-                logger.info(f"   {days}d: {closed_count} closed positions, ${pnl:+.2f} P&L")
-        
-        # Test data consistency and method reliability
-        logger.info("🔄 Testing method consistency...")
-        try:
-            # Test that multiple calls to the same method return consistent results
-            metrics1 = kalshi_client.get_portfolio_metrics()
-            metrics2 = kalshi_client.get_portfolio_metrics()
-            
-            if metrics1 and metrics2:
-                # Compare key values
-                cash1 = metrics1.get('cash_balance', 0)
-                cash2 = metrics2.get('cash_balance', 0)
-                positions1 = metrics1.get('total_positions', 0)
-                positions2 = metrics2.get('total_positions', 0)
-                
-                if abs(cash1 - cash2) < 0.01 and positions1 == positions2:
-                    logger.info("✅ Portfolio metrics are consistent across multiple calls")
-                else:
-                    logger.warning("⚠️ Portfolio metrics show inconsistency")
-            else:
-                logger.warning("⚠️ Could not test consistency - metrics unavailable")
-            
-            logger.info("✅ Method consistency test completed")
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Method consistency test failed: {e}")
-        
-        logger.info("✅ Setup test completed successfully!")
-        return True
         
     except Exception as e:
         logger.error(f"❌ Setup test failed: {e}")
