@@ -81,6 +81,63 @@ class KalshiAPIClient:
             logger.error(f"Failed to load private key: {e}")
             self._private_key = None
     
+    def _get_cache_key(self, cache_type: str, identifier: str = "") -> str:
+        """Generate cache key."""
+        return f"{cache_type}:{identifier}" if identifier else cache_type
+    
+    def _is_cache_valid(self, cache_key: str, cache_type: str) -> bool:
+        """Check if cached data is still valid."""
+        if cache_key not in self._cache:
+            return False
+        
+        cached_time, _ = self._cache[cache_key]
+        ttl = self._cache_ttl.get(cache_type, 300)
+        return (time.time() - cached_time) < ttl
+    
+    def _get_cached(self, cache_type: str, identifier: str = ""):
+        """Get cached data if valid."""
+        cache_key = self._get_cache_key(cache_type, identifier)
+        if self._is_cache_valid(cache_key, cache_type):
+            _, data = self._cache[cache_key]
+            logger.debug(f"Cache hit for {cache_key}")
+            return data
+        return None
+    
+    def _set_cache(self, cache_type: str, data: Any, identifier: str = ""):
+        """Set cached data."""
+        cache_key = self._get_cache_key(cache_type, identifier)
+        self._cache[cache_key] = (time.time(), data)
+        logger.debug(f"Cache set for {cache_key}")
+    
+    def clear_cache(self, cache_type: Optional[str] = None):
+        """Clear cache entries. If cache_type is None, clear all cache."""
+        if cache_type is None:
+            self._cache.clear()
+            logger.info("Cleared all cache")
+        else:
+            keys_to_remove = [key for key in self._cache.keys() if key.startswith(f"{cache_type}:")]
+            for key in keys_to_remove:
+                del self._cache[key]
+            logger.info(f"Cleared {len(keys_to_remove)} cache entries for {cache_type}")
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache statistics for monitoring."""
+        stats = {
+            'total_entries': len(self._cache),
+            'by_type': {},
+            'expired_entries': 0
+        }
+        
+        for cache_key in self._cache.keys():
+            cache_type = cache_key.split(':')[0]
+            stats['by_type'][cache_type] = stats['by_type'].get(cache_type, 0) + 1
+            
+            # Check if expired
+            if not self._is_cache_valid(cache_key, cache_type):
+                stats['expired_entries'] += 1
+        
+        return stats
+    
     def _create_signature(self, timestamp: str, method: str, path: str) -> str:
         """Create the request signature for Kalshi API authentication."""
         if not self._private_key:
