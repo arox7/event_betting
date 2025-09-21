@@ -2,19 +2,21 @@
 Kalshi API client using the official kalshi-python SDK.
 """
 import logging
-from typing import List, Optional, Dict, Any
-from datetime import datetime, timezone, timedelta
-import kalshi_python
-import requests
 import base64
 import time
+import concurrent.futures
+from typing import List, Optional, Dict, Any
+from datetime import datetime, timezone, timedelta
+from pprint import pprint
+
+import kalshi_python
+import requests
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from config import Config, setup_logging
 from models import Market, Event, MarketPosition
-from pprint import pprint
 
 
 # Configure logging with centralized setup
@@ -34,10 +36,11 @@ class KalshiAPIClient:
         # Simple in-memory cache with TTL
         self._cache = {}
         self._cache_ttl = {
-            'market': 300,      # 5 minutes for market data
-            'balance': 300,      # 1 minute for balance
-            'positions': 300,    # 30 seconds for positions
-            'events': 300       # 10 minutes for events
+            'market': 600,      # 10 minutes for market data (less volatile)
+            'balance': 60,      # 1 minute for balance (more volatile)
+            'positions': 120,   # 2 minutes for positions (moderate volatility)
+            'events': 1800,     # 30 minutes for events (very stable)
+            'enriched_positions': 300  # 5 minutes for enriched positions
         }
         
     def _initialize_client(self):
@@ -101,7 +104,6 @@ class KalshiAPIClient:
         cache_key = self._get_cache_key(cache_type, identifier)
         if self._is_cache_valid(cache_key, cache_type):
             _, data = self._cache[cache_key]
-            logger.debug(f"Cache hit for {cache_key}")
             return data
         return None
     
@@ -109,18 +111,20 @@ class KalshiAPIClient:
         """Set cached data."""
         cache_key = self._get_cache_key(cache_type, identifier)
         self._cache[cache_key] = (time.time(), data)
-        logger.debug(f"Cache set for {cache_key}")
     
     def clear_cache(self, cache_type: Optional[str] = None):
         """Clear cache entries. If cache_type is None, clear all cache."""
         if cache_type is None:
             self._cache.clear()
-            logger.info("Cleared all cache")
         else:
             keys_to_remove = [key for key in self._cache.keys() if key.startswith(f"{cache_type}:")]
             for key in keys_to_remove:
                 del self._cache[key]
-            logger.info(f"Cleared {len(keys_to_remove)} cache entries for {cache_type}")
+    
+    def invalidate_positions_cache(self):
+        """Invalidate positions-related cache when positions change."""
+        self.clear_cache('positions')
+        self.clear_cache('enriched_positions')
     
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get cache statistics for monitoring."""
@@ -187,21 +191,119 @@ class KalshiAPIClient:
     def _get_event_from_market(self, market):
         """Get event data from market's event_ticker."""
         try:
-            # For now, create a minimal but complete event from market data
-            # In a full implementation, we'd fetch the actual event data
-            event = Event(
-                event_ticker=market.event_ticker,
-                title=market.title,  # Market title contains the event context
-                category=None,  # Category is optional
-                markets=[],
-                series_ticker=market.event_ticker,
-                total_volume=getattr(market, 'volume', 0) or 0
-            )
-            return event
+            event_ticker = market.event_ticker
+            if not event_ticker:
+                logger.warning(f"Market {market.ticker} has no event_ticker")
+                return None
+            
+            # Check cache first
+            cached_event = self._get_cached('event', event_ticker)
+            if cached_event is not None:
+                return cached_event
+            
+            # Fetch event data from API
+            event = self._fetch_event_by_ticker(event_ticker)
+            if event:
+                # Cache the event
+                self._set_cache('event', event, event_ticker)
+                return event
+            else:
+                logger.error(f"Failed to fetch event {event_ticker} from API")
+                return None
             
         except Exception as e:
-            logger.error(f"Failed to create event from market data: {e}")
+            logger.error(f"Failed to get event for market {market.ticker}: {e}")
             return None
+    
+    def _fetch_event_by_ticker(self, event_ticker: str) -> Optional[Event]:
+        """Fetch a specific event by ticker using direct HTTP requests."""
+        if not self.client:
+            logger.error("Client not initialized")
+            return None
+            
+        try:
+            # Make direct API call to get event
+            url = f"{self.client.api_client.configuration.host}/events/{event_ticker}"
+            headers = self._get_auth_headers()
+            
+            response = requests.get(url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'event' in data and data['event']:
+                    event_dict = data['event']
+                    # Preprocess to handle known issues
+                    cleaned_event_dict = self._preprocess_event_data(event_dict)
+                    if cleaned_event_dict:
+                        event = Event.model_validate(cleaned_event_dict, strict=False)
+                        return event
+                    else:
+                        logger.error(f"Preprocessing returned empty event data for {event_ticker}")
+                        return None
+                else:
+                    logger.error(f"No event data in API response for {event_ticker}: {data}")
+                    return None
+            elif response.status_code == 404:
+                logger.warning(f"Event {event_ticker} not found")
+                return None
+            else:
+                logger.warning(f"Failed to fetch event {event_ticker}: {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error fetching event {event_ticker}: {e}")
+            return None
+    
+    def get_events_by_tickers(self, event_tickers: List[str]) -> Dict[str, Event]:
+        """Fetch multiple events by tickers in batch using concurrent requests."""
+        if not event_tickers:
+            return {}
+        
+        if not self.client:
+            logger.error("Client not initialized")
+            return {}
+        
+        # Check cache first for all tickers
+        cached_events = {}
+        uncached_tickers = []
+        
+        for ticker in event_tickers:
+            cached_event = self._get_cached('event', ticker)
+            if cached_event is not None:
+                cached_events[ticker] = cached_event
+            else:
+                uncached_tickers.append(ticker)
+        
+        # If all events are cached, return them
+        if not uncached_tickers:
+            return cached_events
+        
+        # Fetch uncached events using concurrent requests
+        fetched_events = {}
+        
+        def fetch_single_event(event_ticker):
+            try:
+                return self._fetch_event_by_ticker(event_ticker)
+            except Exception as e:
+                logger.warning(f"Error fetching event {event_ticker}: {e}")
+                return None
+        
+        # Use ThreadPoolExecutor for concurrent requests
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_ticker = {executor.submit(fetch_single_event, ticker): ticker for ticker in uncached_tickers}
+            
+            for future in concurrent.futures.as_completed(future_to_ticker):
+                event_ticker = future_to_ticker[future]
+                event = future.result()
+                if event:
+                    fetched_events[event_ticker] = event
+                    # Cache the result
+                    self._set_cache('event', event, event_ticker)
+        
+        # Combine cached and fetched events
+        all_events = {**cached_events, **fetched_events}
+        
+        return all_events
     
     def _preprocess_event_data(self, data, status: Optional[str] = None):
         """Recursively preprocess event data to handle known API inconsistencies."""
@@ -289,8 +391,6 @@ class KalshiAPIClient:
             return []
             
         try:
-            import requests
-            
             all_events = []
             cursor = None
             
@@ -386,6 +486,82 @@ class KalshiAPIClient:
         except Exception as e:
             logger.error(f"Failed to fetch market {ticker}: {e}")
             return None
+    
+    def get_markets_by_tickers(self, tickers: List[str]) -> Dict[str, Market]:
+        """Fetch multiple markets by tickers in batch using direct HTTP requests."""
+        if not tickers:
+            return {}
+        
+        if not self.client:
+            logger.error("Client not initialized")
+            return {}
+        
+        # Check cache first for all tickers
+        cached_markets = {}
+        uncached_tickers = []
+        
+        for ticker in tickers:
+            cached_market = self._get_cached('market', ticker)
+            if cached_market is not None:
+                cached_markets[ticker] = cached_market
+            else:
+                uncached_tickers.append(ticker)
+        
+        # If all markets are cached, return them
+        if not uncached_tickers:
+            return cached_markets
+        
+        # Fetch uncached markets using batch API call
+        fetched_markets = {}
+        try:
+            # Use the markets endpoint with multiple tickers
+            # Note: Kalshi API may not support batch fetching, so we'll use concurrent requests
+            
+            def fetch_single_market(ticker):
+                try:
+                    url = f"{self.client.api_client.configuration.host}/markets/{ticker}"
+                    headers = self._get_auth_headers()
+                    
+                    response = requests.get(url, headers=headers, timeout=10)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        if 'market' in data and data['market']:
+                            market_dict = data['market']
+                            if market_dict.get("status") == "finalized":
+                                market_dict["status"] = "settled"
+                            market = Market.model_validate(market_dict, strict=False)
+                            # Cache the result
+                            self._set_cache('market', market, ticker)
+                            return ticker, market
+                    else:
+                        logger.warning(f"Failed to fetch market {ticker}: {response.status_code}")
+                        return ticker, None
+                except Exception as e:
+                    logger.warning(f"Error fetching market {ticker}: {e}")
+                    return ticker, None
+            
+            # Use ThreadPoolExecutor for concurrent requests (much faster than sequential)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                future_to_ticker = {executor.submit(fetch_single_market, ticker): ticker for ticker in uncached_tickers}
+                
+                for future in concurrent.futures.as_completed(future_to_ticker):
+                    ticker, market = future.result()
+                    if market:
+                        fetched_markets[ticker] = market
+                        
+        except Exception as e:
+            logger.error(f"Error in batch market fetching: {e}")
+            # Fallback to sequential fetching
+            for ticker in uncached_tickers:
+                market = self.get_market_by_ticker(ticker)
+                if market:
+                    fetched_markets[ticker] = market
+        
+        # Combine cached and fetched markets
+        all_markets = {**cached_markets, **fetched_markets}
+        
+        return all_markets
     
     def get_market_orderbook(self, ticker: str) -> Optional[Dict[str, Any]]:
         """Fetch orderbook for a specific market."""
@@ -560,8 +736,119 @@ class KalshiAPIClient:
             logger.error(f"Failed to get settled positions: {e}")
             return None
     
-    def get_enriched_positions(self) -> Optional[List[Dict[str, Any]]]:
-        """Get positions enriched with market and event data."""
+    def enrich_positions(self, positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Enrich a list of positions with market and event data.
+        
+        Args:
+            positions: List of position dictionaries from the API
+            
+        Returns:
+            List of enriched position dictionaries with market and event data
+        """
+        if not positions:
+            return []
+        
+        # Create a cache key based on the tickers in the positions
+        position_tickers = list(set(pos.get('ticker') for pos in positions if pos.get('ticker')))
+        tickers_hash = hash(tuple(sorted(position_tickers))) if position_tickers else 0
+        cache_key = f"enriched_positions_{tickers_hash}"
+        
+        cached_enriched = self._get_cached('enriched_positions', cache_key)
+        if cached_enriched is not None:
+            return cached_enriched
+        
+        try:
+            if not position_tickers:
+                return []
+            
+            # Use batch fetching instead of sequential API calls
+            markets_dict = self.get_markets_by_tickers(position_tickers)
+            
+            # Extract unique event tickers from markets for batch fetching
+            event_tickers = []
+            market_lookup = {}
+            
+            for ticker, market in markets_dict.items():
+                if market and hasattr(market, 'event_ticker') and market.event_ticker:
+                    event_tickers.append(market.event_ticker)
+                    market_lookup[ticker] = {'market': market, 'event': None}  # Will be filled later
+                elif market:
+                    pass  # Market missing event_ticker
+            
+            # Batch fetch all events
+            if event_tickers:
+                events_dict = self.get_events_by_tickers(event_tickers)
+                
+                # Map events back to markets
+                for ticker, market_info in market_lookup.items():
+                    market = market_info['market']
+                    if market and hasattr(market, 'event_ticker'):
+                        event = events_dict.get(market.event_ticker)
+                        if event:
+                            market_lookup[ticker]['event'] = event
+                        else:
+                            # Remove this market from lookup since we can't get its event
+                            del market_lookup[ticker]
+            
+            # Enrich positions with market data
+            enriched_positions = []
+            for position in positions:
+                ticker = position.get('ticker')
+                if not ticker:
+                    continue
+                
+                market_info = market_lookup.get(ticker)
+                if market_info:
+                    # Calculate unrealized P&L based on current market price vs cost basis
+                    market = market_info['market']
+                    current_position = position['position']
+                    market_exposure = position['market_exposure']  # Current market value in cents
+                    total_traded = position['total_traded']  # Cost basis in cents
+                    
+                    # Calculate unrealized P&L: current market value - cost basis
+                    # For short positions, unrealized P&L = cost basis - current market value
+                    # For closed positions (position == 0), unrealized P&L should be 0
+                    unrealized_pnl = 0
+                    if current_position != 0 and total_traded != 0:
+                        if current_position > 0:  # Long position
+                            unrealized_pnl = market_exposure - total_traded
+                        else:  # Short position
+                            unrealized_pnl = total_traded - market_exposure
+                    
+                    enriched_position = {
+                        'position': position,
+                        'market': market_info['market'],
+                        'event': market_info['event'],
+                        'ticker': ticker,
+                        'quantity': position['position'],
+                        'market_value': position['market_exposure'],  # Kalshi uses market_exposure
+                        'total_cost': position['total_traded'],  # Use total_traded as cost basis
+                        'unrealized_pnl': unrealized_pnl,  # Calculated unrealized P&L
+                        'realized_pnl': position['realized_pnl'],
+                        'is_closed': current_position == 0 and total_traded > 0  # Flag for closed positions
+                    }
+                    enriched_positions.append(enriched_position)
+                else:
+                    continue  # Skip positions without market/event data
+            
+            # Cache the enriched positions
+            self._set_cache('enriched_positions', enriched_positions, cache_key)
+            
+            return enriched_positions
+            
+        except Exception as e:
+            logger.error(f"Failed to enrich positions: {e}")
+            return []
+    
+    def get_enriched_positions(self, include_closed: bool = True) -> Optional[List[Dict[str, Any]]]:
+        """Get positions enriched with market and event data.
+        
+        Args:
+            include_closed: If True, include both open and closed positions. If False, only open positions.
+            
+        Returns:
+            List of enriched positions, or None if unable to fetch positions
+        """
         try:
             # Get positions
             positions_data = self.get_all_positions()
@@ -572,82 +859,17 @@ class KalshiAPIClient:
             if not positions:
                 return []
             
-            # Extract unique tickers from positions that have actual holdings (position != 0)
-            positions_with_holdings = [pos for pos in positions if pos.get('position', 0) != 0]
-            position_tickers = set(pos.get('ticker') for pos in positions_with_holdings if pos.get('ticker'))
+            # Filter positions based on include_closed parameter
+            if include_closed:
+                # Include all positions that have trading history (total_traded > 0)
+                # This includes both open positions (position != 0) and closed positions (position == 0)
+                relevant_positions = [pos for pos in positions if pos.get('total_traded', 0) > 0]
+            else:
+                # Only include positions with actual holdings (position != 0)
+                relevant_positions = [pos for pos in positions if pos.get('position', 0) != 0]
             
-            if not position_tickers:
-                logger.warning("No valid tickers found in positions")
-                return []
-            
-            logger.info(f"Fetching market data for {len(position_tickers)} position tickers")
-            
-            # Create lookup dictionaries
-            market_lookup = {}
-            
-            # Get market data for each ticker we have positions in
-            for ticker in position_tickers:
-                try:
-                    market = self.get_market_by_ticker(ticker)
-                    if market:
-                        # Every market MUST have an event - get it from the event_ticker
-                        if not hasattr(market, 'event_ticker') or not market.event_ticker:
-                            logger.error(f"Market {ticker} missing event_ticker - this should not happen")
-                            continue
-                        
-                        # Get the actual event data - we need to implement this properly
-                        event = self._get_event_from_market(market)
-                        if not event:
-                            logger.error(f"Failed to get event data for market {ticker} - this should not happen")
-                            continue
-                        
-                        market_lookup[ticker] = {
-                            'market': market,
-                            'event': event
-                        }
-                    else:
-                        logger.warning(f"Could not find market data for ticker: {ticker}")
-                except Exception as e:
-                    logger.warning(f"Failed to get market data for {ticker}: {e}")
-                    continue
-            
-            # Enrich positions with market data (only those with actual holdings)
-            enriched_positions = []
-            for position in positions_with_holdings:
-                ticker = position.get('ticker')
-                if not ticker:
-                    continue
-                
-                market_info = market_lookup.get(ticker)
-                if market_info:
-                    enriched_position = {
-                        'position': position,
-                        'market': market_info['market'],
-                        'event': market_info['event'],
-                        'ticker': ticker,
-                        'quantity': position['position'],
-                        'market_value': position['market_exposure'],  # Kalshi uses market_exposure
-                        'total_cost': position['total_traded'],  # Use total_traded as cost basis
-                        'unrealized_pnl': 0,  # Calculate this based on current market price vs cost
-                        'realized_pnl': position['realized_pnl']
-                    }
-                    enriched_positions.append(enriched_position)
-                else:
-                    # Position without matching market (might be settled/closed)
-                    enriched_position = {
-                        'position': position,
-                        'market': None,
-                        'event': None,
-                        'ticker': ticker,
-                        'quantity': position['position'],
-                        'market_value': position['market_exposure'],  # Kalshi uses market_exposure
-                        'total_cost': position['total_traded'],  # Use total_traded as cost basis
-                        'unrealized_pnl': 0,  # Can't calculate without market data
-                        'realized_pnl': position['realized_pnl']
-                    }
-                    enriched_positions.append(enriched_position)
-            
-            return enriched_positions
+            # Use the new enrich_positions method
+            return self.enrich_positions(relevant_positions)
             
         except Exception as e:
             logger.error(f"Failed to get enriched positions: {e}")
@@ -691,6 +913,8 @@ class KalshiAPIClient:
             return market_positions
         
         filtered_positions = []
+        excluded_count = 0
+        
         for pos in market_positions:
             try:
                 # Parse the timestamp
@@ -699,28 +923,35 @@ class KalshiAPIClient:
                     last_updated_str = last_updated_str[:-1] + '+00:00'
                 
                 pos_datetime = datetime.fromisoformat(last_updated_str)
+                pos_date = pos_datetime.date()
                 
                 # Filter by date range (compare dates, not datetime objects)
+                include_position = True
                 if start_date:
                     # Convert start_date to date if it's a datetime
                     start_date_only = start_date.date() if hasattr(start_date, 'date') else start_date
-                    if pos_datetime.date() < start_date_only:
-                        continue
-                if end_date:
+                    if pos_date < start_date_only:
+                        include_position = False
+                        excluded_count += 1
+                if end_date and include_position:
                     # Convert end_date to date if it's a datetime
                     end_date_only = end_date.date() if hasattr(end_date, 'date') else end_date
-                    if pos_datetime.date() > end_date_only:
-                        continue
+                    if pos_date > end_date_only:
+                        include_position = False
+                        excluded_count += 1
                 
-                filtered_positions.append(pos)
+                if include_position:
+                    filtered_positions.append(pos)
+                    
             except Exception as e:
                 logger.warning(f"Error parsing date for position {pos.get('ticker', 'Unknown')}: {e}")
+                excluded_count += 1
                 continue
         
         return filtered_positions
 
-    def get_portfolio_metrics(self, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
-        """Get comprehensive portfolio metrics including cash, positions, and P&L with optional date filtering."""
+    def get_portfolio_metrics(self) -> Optional[Dict[str, Any]]:
+        """Get comprehensive portfolio metrics including cash, positions, and P&L."""
         try:
             # Get cash balance (in dollars)
             cash_balance_dollars = self.get_balance_dollars()
@@ -733,18 +964,12 @@ class KalshiAPIClient:
                 return None
             
             # Get enriched positions for detailed calculations (active positions only)
-            enriched_positions = self.get_enriched_positions()
+            enriched_positions = self.get_enriched_positions(include_closed=False)
             if enriched_positions is None:
                 enriched_positions = []
             
             # Extract market positions (all positions including closed ones)
             all_market_positions = all_positions_data['all_market_positions']
-            
-            # Apply date filtering to market positions if dates are provided
-            if start_date or end_date:
-                filtered_market_positions = self.filter_market_positions_by_date(all_market_positions, start_date, end_date)
-            else:
-                filtered_market_positions = all_market_positions
             
             # Calculate metrics from enriched positions (active positions only)
             total_active_positions = len(enriched_positions)
@@ -753,11 +978,11 @@ class KalshiAPIClient:
             total_market_value_dollars = sum(abs(pos['market_value']) for pos in enriched_positions) / 100.0
             total_unrealized_pnl_dollars = sum(pos['unrealized_pnl'] for pos in enriched_positions) / 100.0
             
-            # Calculate realized P&L from filtered market positions, accounting for fees
+            # Calculate realized P&L from all market positions, accounting for fees
             total_realized_pnl_cents = 0
             total_fees_paid_cents = 0
             
-            for pos in filtered_market_positions:
+            for pos in all_market_positions:
                 realized_pnl_cents = pos['realized_pnl']  # Already in cents
                 fees_paid_cents = pos['fees_paid']  # Already in cents
                 total_realized_pnl_cents += realized_pnl_cents
@@ -776,8 +1001,12 @@ class KalshiAPIClient:
             win_rate = (winning_positions / total_active_positions) * 100 if total_active_positions > 0 else 0
             portfolio_return = (total_unrealized_pnl_dollars / total_market_value_dollars) * 100 if total_market_value_dollars > 0 else 0
             
-            # Calculate closed positions from filtered data
-            closed_positions = [pos for pos in filtered_market_positions if pos['position'] == 0 and pos['total_traded'] > 0]
+            # Calculate closed positions from all data (client-side filtering will handle date ranges)
+            closed_positions = [pos for pos in all_market_positions if pos['position'] == 0 and pos['total_traded'] > 0]
+            
+            # Don't enrich closed positions by default - only when specifically requested for display
+            # This keeps the portfolio metrics calculation fast
+            enriched_closed_positions = []
             
             return {
                 'cash_balance': cash_balance_dollars,  # In dollars
@@ -791,75 +1020,27 @@ class KalshiAPIClient:
                 'losing_positions': losing_positions,
                 'win_rate': win_rate,
                 'portfolio_return': portfolio_return,
-                'enriched_positions': enriched_positions,
+                'enriched_positions': enriched_positions,  # Active positions only
+                'enriched_closed_positions': enriched_closed_positions,  # Closed positions with market/event data
                 'market_positions': all_market_positions,  # All market positions (unfiltered)
-                'filtered_market_positions': filtered_market_positions,  # Date-filtered market positions
-                'closed_positions': closed_positions,  # Closed positions from filtered data
-                'total_filtered_positions': len(filtered_market_positions),
-                'total_closed_positions': len(closed_positions),
-                'date_range_start': start_date,
-                'date_range_end': end_date
+                'closed_positions': closed_positions,  # All closed positions (raw data)
+                'total_closed_positions': len(closed_positions)
             }
             
         except Exception as e:
             logger.error(f"Failed to get portfolio metrics: {e}")
             return None
 
-    def get_portfolio_summary(self) -> Optional[Dict[str, Any]]:
-        """Get comprehensive portfolio summary including positions and PnL."""
-        try:
-            # Get cash balance
-            cash_balance = self.get_balance()
-            if cash_balance is None:
-                return None
-            
-            # Get positions
-            positions_data = self.get_all_positions()
-            if positions_data is None:
-                return None
-            
-            positions = positions_data.get('positions', [])
-            
-            # Calculate position values
-            total_position_value = 0
-            total_unrealized_pnl = 0
-            position_count = len(positions)
-            
-            for position in positions:
-                # Position value should use market_exposure (already in cents from API)
-                market_exposure_cents = position['market_exposure']
-                position_value = abs(market_exposure_cents) / 100.0  # Convert cents to dollars
-                total_position_value += position_value
-                
-                # Unrealized PnL (not available in raw market positions, set to 0)
-                # Note: Raw market positions don't include unrealized P&L, only realized P&L
-                unrealized_pnl_cents = 0  # Raw positions don't have unrealized P&L
-                total_unrealized_pnl += unrealized_pnl_cents / 100.0
-            
-            total_balance = cash_balance + total_position_value
-            
-            return {
-                'cash_balance': cash_balance,
-                'total_position_value': total_position_value,
-                'total_balance': total_balance,
-                'unrealized_pnl': total_unrealized_pnl,
-                'position_count': position_count,
-                'positions': positions
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to get portfolio summary: {e}")
-            return None
     
     def get_recent_pnl(self, hours: int = 24) -> Optional[Dict[str, Any]]:
         """Get realized P&L from recent trading activity."""
         try:
-            from datetime import datetime, timezone, timedelta
             
             # Get recent fills to calculate realized PnL
             fills_data = self.get_fills(limit=200)
             if fills_data is None:
-                return {'realized_pnl': 0, 'trade_count': 0, 'trades': []}
+                logger.error("Failed to get fills data for recent P&L calculation")
+                return None
             
             fills = fills_data.get('fills', [])
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -913,7 +1094,7 @@ class KalshiAPIClient:
             
         except Exception as e:
             logger.error(f"Failed to get recent PnL: {e}")
-            return {'realized_pnl': 0, 'trade_count': 0, 'trades': []}
+            return None
     
     def health_check(self) -> bool:
         """Check if the API client is working properly."""

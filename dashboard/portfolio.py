@@ -2,11 +2,15 @@
 Portfolio Overview Page
 """
 import logging
-import streamlit as st
-import pandas as pd
-from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Any, Optional
 from pprint import pprint
+
+import pandas as pd
+import streamlit as st
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
 from kalshi_client import KalshiAPIClient
 from kalshi_websocket import WebSocketManager
 from models import utc_now, MarketPosition
@@ -28,6 +32,8 @@ class PortfolioPage:
             st.session_state.portfolio_data = None
         if 'portfolio_last_update' not in st.session_state:
             st.session_state.portfolio_last_update = None
+        if 'enriched_closed_positions_cache' not in st.session_state:
+            st.session_state.enriched_closed_positions_cache = None
     
     def render(self):
         """Render the portfolio page."""
@@ -85,7 +91,7 @@ class PortfolioPage:
             date_range = st.date_input(
                 "Select date range for calculations:",
                 value=(default_start, default_end),
-                max_value=datetime.now().date(),
+                max_value=datetime.now().date() + timedelta(days=1),  # Allow today's date
                 help="Filter portfolio calculations and P&L by this date range"
             )
             
@@ -140,6 +146,9 @@ class PortfolioPage:
                 st.session_state.portfolio_data = portfolio_metrics
                 st.session_state.portfolio_last_update = utc_now()
                 
+                # Clear enriched closed positions cache since we have new data
+                st.session_state.enriched_closed_positions_cache = None
+                
                 st.success(f"Portfolio data loaded successfully - {len(enriched_positions)} current positions, {len(market_positions)} total market positions")
                 
         except Exception as e:
@@ -147,7 +156,7 @@ class PortfolioPage:
             st.error("This might be due to API authentication issues or network problems.")
     
     def _apply_date_filtering(self):
-        """Apply date filtering by calling the API with date parameters."""
+        """Apply date filtering using client-side filtering (much faster than API calls)."""
         if not st.session_state.portfolio_data:
             return
         
@@ -159,41 +168,121 @@ class PortfolioPage:
         if hasattr(st.session_state, 'date_range_end') and st.session_state.date_range_end:
             end_date = datetime.combine(st.session_state.date_range_end, datetime.max.time())
         
-        # Only apply filtering if dates are provided
-        if start_date or end_date:
-            try:
-                with st.spinner("Applying date filter..."):
-                    # Get portfolio metrics with date filtering from API
-                    filtered_portfolio_metrics = self.kalshi_client.get_portfolio_metrics(start_date=start_date, end_date=end_date)
+        # Use client-side filtering instead of expensive API calls
+        all_market_positions = st.session_state.portfolio_data['market_positions']
+        
+        # Debug logging
+        logger.info(f"Date filtering: start_date={start_date}, end_date={end_date}")
+        logger.info(f"Total market positions before filtering: {len(all_market_positions)}")
+        
+        # Apply date filtering using the existing client method
+        filtered_market_positions = self.kalshi_client.filter_market_positions_by_date(
+            all_market_positions, start_date, end_date
+        )
+        
+        logger.info(f"Total market positions after filtering: {len(filtered_market_positions)}")
+        
+        # Calculate ALL metrics from filtered data (not just realized P&L)
+        total_realized_pnl_cents = 0
+        total_fees_paid_cents = 0
+        
+        # Calculate win/loss metrics from filtered positions
+        winning_positions = 0
+        losing_positions = 0
+        total_unrealized_pnl_cents = 0
+        
+        # Filter enriched positions by date as well (for win rate calculations)
+        enriched_positions = st.session_state.portfolio_data['enriched_positions']
+        filtered_enriched_positions = []
+        
+        for pos in enriched_positions:
+            # Check if this position's last update falls within the date range
+            position_data = pos.get('position', {})
+            if position_data.get('last_updated_ts'):
+                try:
+                    last_updated_str = position_data['last_updated_ts']
+                    if last_updated_str.endswith('Z'):
+                        last_updated_str = last_updated_str[:-1] + '+00:00'
                     
-                    if filtered_portfolio_metrics:
-                        # Update session state with filtered data
-                        st.session_state.portfolio_data.update({
-                            'filtered_market_positions': filtered_portfolio_metrics['filtered_market_positions'],
-                            'total_realized_pnl': filtered_portfolio_metrics['total_realized_pnl'],
-                            'total_fees_paid': filtered_portfolio_metrics['total_fees_paid'],
-                            'closed_positions': filtered_portfolio_metrics['closed_positions'],
-                            'total_filtered_positions': filtered_portfolio_metrics['total_filtered_positions'],
-                            'total_closed_positions': filtered_portfolio_metrics['total_closed_positions'],
-                            'date_range_start': start_date,
-                            'date_range_end': end_date
-                        })
-                    else:
-                        st.error("Failed to apply date filtering")
-            except Exception as e:
-                st.error(f"Error applying date filter: {e}")
-        else:
-            # No date filtering - use original unfiltered data
-            st.session_state.portfolio_data.update({
-                'filtered_market_positions': st.session_state.portfolio_data['market_positions'],
-                'total_realized_pnl': st.session_state.portfolio_data['total_realized_pnl'],
-                'total_fees_paid': st.session_state.portfolio_data['total_fees_paid'],
-                'closed_positions': [pos for pos in st.session_state.portfolio_data['market_positions'] if pos['position'] == 0 and pos['total_traded'] > 0],
-                'total_filtered_positions': len(st.session_state.portfolio_data['market_positions']),
-                'total_closed_positions': len([pos for pos in st.session_state.portfolio_data['market_positions'] if pos['position'] == 0 and pos['total_traded'] > 0]),
-                'date_range_start': None,
-                'date_range_end': None
-            })
+                    pos_datetime = datetime.fromisoformat(last_updated_str)
+                    
+                    # Check if position falls within date range (inclusive)
+                    include_position = True
+                    if start_date:
+                        start_date_only = start_date.date() if hasattr(start_date, 'date') else start_date
+                        if pos_datetime.date() < start_date_only:
+                            include_position = False
+                    if end_date and include_position:
+                        end_date_only = end_date.date() if hasattr(end_date, 'date') else end_date
+                        if pos_datetime.date() > end_date_only:  # Exclude dates after end_date
+                            include_position = False
+                    
+                    if include_position:
+                        filtered_enriched_positions.append(pos)
+                        # Count wins/losses for win rate calculation
+                        unrealized_pnl = pos.get('unrealized_pnl', 0)
+                        total_unrealized_pnl_cents += unrealized_pnl
+                        if unrealized_pnl > 0:
+                            winning_positions += 1
+                        elif unrealized_pnl < 0:
+                            losing_positions += 1
+                except Exception as e:
+                    logger.warning(f"Error parsing date for enriched position {pos.get('ticker', 'Unknown')}: {e}")
+                    # Include position if we can't parse the date
+                    filtered_enriched_positions.append(pos)
+            else:
+                # Include position if no date available
+                filtered_enriched_positions.append(pos)
+        
+        # Calculate realized P&L from filtered market positions
+        for pos in filtered_market_positions:
+            realized_pnl_cents = pos['realized_pnl']
+            fees_paid_cents = pos['fees_paid']
+            total_realized_pnl_cents += realized_pnl_cents
+            total_fees_paid_cents += fees_paid_cents
+        
+        # Convert to dollars
+        total_realized_pnl_dollars = (total_realized_pnl_cents - total_fees_paid_cents) / 100.0
+        total_fees_paid_dollars = total_fees_paid_cents / 100.0
+        total_unrealized_pnl_dollars = total_unrealized_pnl_cents / 100.0
+        
+        # Calculate closed positions from filtered data
+        closed_positions = [pos for pos in filtered_market_positions if pos['position'] == 0 and pos['total_traded'] > 0]
+        
+        # Calculate win rate from filtered data
+        total_filtered_active_positions = len(filtered_enriched_positions)
+        win_rate = (winning_positions / total_filtered_active_positions) * 100 if total_filtered_active_positions > 0 else 0
+        
+        # Calculate total portfolio value (cash + market value from filtered positions)
+        cash_balance = st.session_state.portfolio_data['cash_balance']
+        total_market_value_dollars = sum(abs(pos.get('market_value', 0)) for pos in filtered_enriched_positions) / 100.0
+        total_portfolio_value_dollars = cash_balance + total_market_value_dollars
+        
+        # Calculate portfolio return
+        portfolio_return = (total_unrealized_pnl_dollars / total_market_value_dollars) * 100 if total_market_value_dollars > 0 else 0
+        
+        # Update session state with ALL filtered metrics (no API call needed!)
+        st.session_state.portfolio_data.update({
+            'filtered_market_positions': filtered_market_positions,
+            'filtered_enriched_positions': filtered_enriched_positions,
+            'total_realized_pnl': total_realized_pnl_dollars,
+            'total_unrealized_pnl': total_unrealized_pnl_dollars,
+            'total_fees_paid': total_fees_paid_dollars,
+            'closed_positions': closed_positions,
+            'total_filtered_positions': len(filtered_market_positions),
+            'total_closed_positions': len(closed_positions),
+            'total_positions': total_filtered_active_positions,
+            'winning_positions': winning_positions,
+            'losing_positions': losing_positions,
+            'win_rate': win_rate,
+            'portfolio_return': portfolio_return,
+            'total_market_value': total_market_value_dollars,
+            'total_portfolio_value': total_portfolio_value_dollars,
+            'date_range_start': start_date,
+            'date_range_end': end_date
+        })
+        
+        logger.info(f"Applied comprehensive date filtering: {len(filtered_market_positions)} market positions, {len(filtered_enriched_positions)} enriched positions, {len(closed_positions)} closed, win rate: {win_rate:.1f}%")
     
     def _display_portfolio_metrics(self):
         """Display portfolio metrics."""
@@ -306,12 +395,7 @@ class PortfolioPage:
                 event = pos.get('event')
                 
                 # Create display title
-                if market and event:
-                    display_title = f"{event.title} - {market.title}"
-                elif market:
-                    display_title = market.title or ticker
-                else:
-                    display_title = ticker
+                display_title = f"{event.title} - {market.yes_sub_title}"
                 
                 # Determine position direction using quantity (which is the actual position value)
                 if quantity > 0:
@@ -328,7 +412,8 @@ class PortfolioPage:
                 kalshi_link = f"https://kalshi.com/markets/{event.series_ticker}"
             
                 table_data.append({
-                    'Ticker': kalshi_link,
+                    'Ticker': market.ticker,
+                    'Kalshi Link': kalshi_link,
                     'Market': display_title,
                     'Direction': f"{direction_color} {direction}",
                     'Quantity': abs(quantity),
@@ -357,9 +442,14 @@ class PortfolioPage:
             width='stretch',
             hide_index=True,
             column_config={
-                "Ticker": st.column_config.LinkColumn(
+                "Ticker": st.column_config.TextColumn(
                     "Ticker",
-                    help="Click to view market on Kalshi"
+                    help="Market ticker symbol"
+                ),
+                "Kalshi Link": st.column_config.LinkColumn(
+                    "Kalshi Link",
+                    help="Click to view market on Kalshi",
+                    display_text="View on Kalshi"
                 ),
                 "Market": st.column_config.TextColumn(
                     "Market",
@@ -397,49 +487,75 @@ class PortfolioPage:
                 st.info("No portfolio data available")
                 return
             
-            # Use pre-computed closed positions from cached data
-            closed_positions = st.session_state.portfolio_data['closed_positions']
+            # Get raw closed positions and enrich them on-demand for display
+            closed_positions = st.session_state.portfolio_data.get('closed_positions', [])
             
             if not closed_positions:
                 st.info("No closed positions found")
                 return
             
-            # Process market positions data for display
+            # Check if we have cached enriched closed positions
+            enriched_closed_positions = st.session_state.enriched_closed_positions_cache
+            
+            if not enriched_closed_positions:
+                # Enrich closed positions on-demand for display (only when this tab is accessed)
+                with st.spinner("Loading closed positions details..."):
+                    enriched_closed_positions = self.kalshi_client.enrich_positions(closed_positions)
+                
+                # Cache the enriched positions for this session
+                st.session_state.enriched_closed_positions_cache = enriched_closed_positions
+            
+            if not enriched_closed_positions:
+                st.info("No enriched closed positions available")
+                return
+            
+            # Process enriched closed positions for display (same format as open positions)
             table_data = []
-            for pos_data in closed_positions:
-                # Create MarketPosition object for validation
-                market_pos = MarketPosition.model_validate(pos_data)
-                
-                # Calculate net realized P&L (realized P&L - fees)
-                net_realized_pnl = market_pos.net_realized_pnl_dollars
-                
-                # Calculate average price from total traded and position history
-                # For closed positions, we can't easily calculate exact average price from this data
-                # so we'll show total traded value instead
-                total_traded = market_pos.total_traded_dollars_float
-                
-                # Parse timestamp and format
-                from datetime import datetime
-                dt = datetime.fromisoformat(market_pos.last_updated_ts.replace('Z', '+00:00'))
-                formatted_time = dt.strftime('%Y-%m-%d %H:%M UTC')
-                
-                # Create display title from ticker (we don't have market title in this data)
-                display_title = market_pos.ticker
-                
-                # Determine position direction based on trading history
-                # Since position is 0, we can't determine original direction easily
-                direction = "CLOSED"
-                direction_color = "⚪"
-                
-                table_data.append({
-                    'Ticker': f"https://kalshi.com/markets/{market_pos.ticker}",
-                    'Market': display_title,
-                    'Direction': f"{direction_color} {direction}",
-                    'Total Traded': f"${total_traded:.2f}",
-                    'Fees Paid': f"${market_pos.fees_paid_dollars_float:.2f}",
-                    'Net Realized P&L': f"${net_realized_pnl:.2f}",
-                    'Last Updated': formatted_time
-                })
+            for enriched_pos in enriched_closed_positions:
+                try:
+                    # Extract data from enriched position
+                    ticker = enriched_pos['ticker']
+                    market = enriched_pos['market']
+                    event = enriched_pos['event']
+                    position_data = enriched_pos['position']
+                    
+                    # Create MarketPosition object for validation
+                    market_pos = MarketPosition.model_validate(position_data)
+                    
+                    # Calculate net realized P&L (realized P&L - fees)
+                    net_realized_pnl = market_pos.net_realized_pnl_dollars
+                    
+                    # Calculate average price from total traded and position history
+                    total_traded = market_pos.total_traded_dollars_float
+                    
+                    # Parse timestamp and format
+                    dt = datetime.fromisoformat(market_pos.last_updated_ts.replace('Z', '+00:00'))
+                    formatted_time = dt.strftime('%Y-%m-%d %H:%M UTC')
+                    
+                    # Create display title with event and market information (same as open positions)
+                    display_title = f"{event.title} - {market.yes_sub_title}"
+                    
+                    # Create Kalshi link using event.series_ticker (same as open positions)
+                    kalshi_link = f"https://kalshi.com/markets/{event.series_ticker}"
+                    
+                    # Determine position direction based on trading history
+                    # Since position is 0, we can't determine original direction easily
+                    direction = "CLOSED"
+                    direction_color = "⚪"
+                    
+                    table_data.append({
+                        'Ticker': market.ticker,  # Use market.ticker (same as open positions)
+                        'Kalshi Link': kalshi_link,
+                        'Market': display_title,
+                        'Direction': f"{direction_color} {direction}",
+                        'Total Traded': f"${total_traded:.2f}",
+                        'Fees Paid': f"${market_pos.fees_paid_dollars_float:.2f}",
+                        'Net Realized P&L': f"${net_realized_pnl:.2f}",
+                        'Last Updated': formatted_time
+                    })
+                except Exception as e:
+                    logger.warning(f"Error processing enriched closed position {enriched_pos.get('ticker', 'Unknown')}: {e}")
+                    continue
             
             if not table_data:
                 st.info("No valid closed positions to display")
@@ -458,9 +574,14 @@ class PortfolioPage:
                 width='stretch',
                 hide_index=True,
                 column_config={
-                    "Ticker": st.column_config.LinkColumn(
+                    "Ticker": st.column_config.TextColumn(
                         "Ticker",
-                        help="Click to view market on Kalshi"
+                        help="Market ticker symbol"
+                    ),
+                    "Kalshi Link": st.column_config.LinkColumn(
+                        "Kalshi Link",
+                        help="Click to view market on Kalshi",
+                        display_text="View on Kalshi"
                     ),
                     "Market": st.column_config.TextColumn(
                         "Market",
@@ -592,8 +713,6 @@ class PortfolioPage:
                 st.metric("Average Position P&L", f"${avg_pnl:.2f}")
                 
             else:  # Both
-                import plotly.graph_objects as go
-                from plotly.subplots import make_subplots
                 
                 fig = make_subplots(
                     rows=2, cols=1,
