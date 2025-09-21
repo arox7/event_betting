@@ -112,10 +112,8 @@ class PortfolioPage:
         if st.session_state.portfolio_data:
             self._apply_date_filtering()
         
-        # Display portfolio metrics if available
-        if st.session_state.portfolio_data:
-            self._display_portfolio_metrics()
-        else:
+        # Portfolio metrics are now displayed within the Current Positions tab
+        if not st.session_state.portfolio_data:
             st.info("Loading portfolio data...")
     
     def _load_portfolio_data(self):
@@ -358,14 +356,113 @@ class PortfolioPage:
             st.info("No current positions found in your portfolio")
             return
         
+        # Show consolidated portfolio summary with accurate calculations
+        self._render_consolidated_portfolio_summary()
+        
         # Create positions table
         self._render_positions_table(enriched_positions)
     
+    def _render_consolidated_portfolio_summary(self):
+        """Render consolidated portfolio summary with accurate unrealized P&L calculations."""
+        try:
+            # Get accurate unrealized P&L data
+            all_unrealized_pnl = self.kalshi_client.get_all_unrealized_pnl()
+            portfolio_data = st.session_state.portfolio_data
+            
+            if not all_unrealized_pnl:
+                st.warning("Could not load unrealized P&L data")
+                return
+            
+            # Extract accurate values
+            total_unrealized_pnl = all_unrealized_pnl.get('total_unrealized_pnl', 0)
+            accurate_market_value = all_unrealized_pnl.get('total_market_value', 0)
+            position_count = all_unrealized_pnl.get('position_count', 0)
+            
+            # Calculate overall return percentage
+            if accurate_market_value > 0:
+                overall_return_pct = (total_unrealized_pnl / accurate_market_value) * 100
+            else:
+                overall_return_pct = 0
+            
+            # Get other portfolio data
+            cash_balance = portfolio_data['cash_balance']
+            total_realized_pnl = portfolio_data['total_realized_pnl']
+            total_portfolio_value = cash_balance + accurate_market_value
+            
+            # First row - Core financial metrics
+            col1, col2, col3, col4, col5 = st.columns(5)
+            
+            with col1:
+                st.metric("Cash Balance", f"${cash_balance:.2f}")
+            
+            with col2:
+                st.metric("Market Value", f"${accurate_market_value:.2f}")
+            
+            with col3:
+                st.metric("Total Portfolio", f"${total_portfolio_value:.2f}")
+            
+            with col4:
+                st.metric("Realized P&L", f"${total_realized_pnl:.2f}")
+            
+            with col5:
+                st.metric("Unrealized P&L", f"${total_unrealized_pnl:.2f}")
+            
+            # Second row - Additional metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Active Positions", position_count)
+            
+            with col2:
+                total_closed_positions = portfolio_data['total_closed_positions']
+                st.metric("Closed Positions", total_closed_positions)
+            
+            with col3:
+                total_filtered_positions = portfolio_data['total_filtered_positions']
+                st.metric("Filtered Markets", total_filtered_positions)
+
+            
+            # Last updated timestamp
+            if st.session_state.portfolio_last_update:
+                st.caption(f"Last updated: {st.session_state.portfolio_last_update.strftime('%H:%M:%S UTC')}")
+            
+            # Add explanation
+            with st.expander("ℹ️ How Unrealized P&L is Calculated"):
+                st.markdown("""
+                **Unrealized P&L Calculation:**
+                
+                1. **Cost Basis**: Average price per contract = Total cost ÷ Quantity
+                2. **Current Price**: Latest market price from the last trade
+                3. **Unrealized P&L**: (Current Price - Cost Basis) × Quantity
+                4. **Fees**: Total fees paid for trading this position
+                5. **Net P&L**: Realized P&L + Unrealized P&L - Fees
+                
+                **Example:**
+                - Bought 10 contracts at $0.54 each = $5.40 total cost
+                - Current market price = $0.53
+                - Unrealized P&L = ($0.53 - $0.54) × 10 = -$0.10
+                - Fees paid = $0.02
+                - Net P&L = Realized P&L + (-$0.10) - $0.02
+                """)
+                
+        except Exception as e:
+            st.warning(f"Could not load consolidated portfolio summary: {e}")
+    
+    
     def _render_positions_table(self, positions: List[Dict[str, Any]]):
-        """Render positions in a table format."""
+        """Render positions in a table format with unrealized P&L."""
         if not positions:
             st.info("No positions to display")
             return
+        
+        # Get unrealized P&L data for all positions
+        unrealized_pnl_data = {}
+        try:
+            all_unrealized_pnl = self.kalshi_client.get_all_unrealized_pnl()
+            if all_unrealized_pnl:
+                unrealized_pnl_data = all_unrealized_pnl.get('positions', {})
+        except Exception as e:
+            st.warning(f"Could not load unrealized P&L data: {e}")
             
         # Prepare data for table
         table_data = []
@@ -379,15 +476,22 @@ class PortfolioPage:
                 position_value = pos['quantity']  # Use quantity as the position value for comparisons
                 market_value_cents = pos['market_value']  # In cents
                 realized_pnl_cents = pos['realized_pnl']  # In cents
-                total_cost_cents = pos['total_cost']  # In cents
+                pos_cost_cents = pos["position"]['market_exposure']  # In cents
                 
                 # Convert to dollars
                 market_value = market_value_cents / 100.0
                 realized_pnl = realized_pnl_cents / 100.0
-                total_cost = total_cost_cents / 100.0
+                total_cost = pos_cost_cents / 100.0
                 
                 # Calculate average price from total cost and quantity
                 average_price = total_cost / abs(quantity) if quantity != 0 else 0
+                
+                # Get unrealized P&L data for this ticker
+                pnl_info = unrealized_pnl_data.get(ticker, {})
+                current_price = pnl_info.get('current_price', 0)
+                unrealized_pnl = pnl_info.get('unrealized_pnl', 0)
+                fees_paid = pnl_info.get('fees_paid', 0)
+                net_pnl = pnl_info.get('net_pnl', realized_pnl)
                 
                 # Get market and event info for display
                 market = pos.get('market')
@@ -417,7 +521,11 @@ class PortfolioPage:
                     'Direction': f"{direction_color} {direction}",
                     'Quantity': abs(quantity),
                     'Avg Price': f"${average_price:.2f}",
+                    'Current Price': f"${current_price:.2f}",
                     'Market Value': f"${abs(market_value):.2f}",
+                    'Unrealized P&L': f"${unrealized_pnl:.2f}",
+                    'Fees': f"${fees_paid:.2f}",
+                    'Net P&L': f"${net_pnl:.2f}",
                 })
             except Exception as e:
                 st.warning(f"Error processing position {pos['ticker']}: {e}")
@@ -460,17 +568,37 @@ class PortfolioPage:
                 ),
                 "Quantity": st.column_config.NumberColumn(
                     "Quantity",
-                    help="Number of contracts",
+                    help="Number of contracts held",
                     format="%d"
                 ),
                 "Avg Price": st.column_config.NumberColumn(
                     "Avg Price",
-                    help="Average price per contract",
+                    help="Average cost basis per contract (total cost ÷ quantity)",
+                    format="$%.2f"
+                ),
+                "Current Price": st.column_config.NumberColumn(
+                    "Current Price",
+                    help="Latest market price per contract (from last trade)",
                     format="$%.2f"
                 ),
                 "Market Value": st.column_config.NumberColumn(
                     "Market Value",
-                    help="Current market value of position",
+                    help="Current market value (quantity × current price)",
+                    format="$%.2f"
+                ),
+                "Unrealized P&L": st.column_config.NumberColumn(
+                    "Unrealized P&L",
+                    help="Unrealized profit/loss: (current price - avg price) × quantity",
+                    format="$%.2f"
+                ),
+                "Fees": st.column_config.NumberColumn(
+                    "Fees",
+                    help="Total fees paid for this position",
+                    format="$%.2f"
+                ),
+                "Net P&L": st.column_config.NumberColumn(
+                    "Net P&L",
+                    help="Total P&L including realized and unrealized gains/losses minus fees",
                     format="$%.2f"
                 )
             }

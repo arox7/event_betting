@@ -177,6 +177,180 @@ def get_settlements(client: KalshiHTTPClient, limit: int = 100, cursor: Optional
         logger.error(f"Failed to get settlements: {e}")
         return None
 
+def get_recent_pnl(client: KalshiHTTPClient, hours: int = 24) -> Optional[Dict[str, Any]]:
+    """Get realized P&L from recent trading activity using position data."""
+    try:
+        # Get all positions and filter by recent activity
+        positions_data = get_all_positions(client)
+        if not positions_data:
+            return {
+                'recent_realized_pnl': 0.0,
+                'recent_trading_volume': 0.0,
+                'recent_trades_count': 0,
+                'hours': hours
+            }
+        
+        now = datetime.now(timezone.utc)
+        cutoff_time = now - timedelta(hours=hours)
+        
+        total_realized_pnl = 0.0
+        total_volume = 0.0
+        recent_positions = 0
+        
+        # Check all market positions for recent activity
+        for pos in positions_data.get('all_market_positions', []):
+            try:
+                # Parse last updated timestamp
+                last_updated_str = pos['last_updated_ts']
+                if last_updated_str.endswith('Z'):
+                    last_updated_str = last_updated_str[:-1] + '+00:00'
+                
+                pos_datetime = datetime.fromisoformat(last_updated_str)
+                
+                # If position was updated within the time window
+                if pos_datetime >= cutoff_time:
+                    recent_positions += 1
+                    realized_pnl_dollars = float(pos['realized_pnl_dollars'])
+                    total_traded_dollars = float(pos['total_traded_dollars'])
+                    
+                    total_realized_pnl += realized_pnl_dollars
+                    total_volume += total_traded_dollars
+                    
+            except Exception as e:
+                logger.warning(f"Error parsing position timestamp: {e}")
+                continue
+        
+        return {
+            'recent_realized_pnl': total_realized_pnl,
+            'recent_trading_volume': total_volume,
+            'recent_trades_count': recent_positions,
+            'hours': hours
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get recent P&L: {e}")
+        return None
+
+def calculate_unrealized_pnl(client: KalshiHTTPClient, ticker: str) -> Optional[Dict[str, Any]]:
+    """Calculate unrealized P&L for a specific position using position data and current market price."""
+    try:
+        # Get position data first
+        positions_data = get_all_positions(client)
+        if not positions_data:
+            return None
+        
+        # Find the position for this ticker
+        position = None
+        for pos in positions_data.get('active_positions', []):
+            if pos.get('ticker') == ticker:
+                position = pos
+                break
+        
+        if not position:
+            return None
+        
+        # Get current market price
+        from .market_functions import get_market_by_ticker
+        market = get_market_by_ticker(client, ticker)
+        if not market:
+            return None
+        
+        # Use last price as the most accurate current price, fallback to mid/bid/ask
+        # Market is a Market object, so access attributes directly
+        current_price = market.last_price_dollars
+        
+        if current_price is None:
+            return None
+        
+        # Extract position data
+        position_size = position['position']  # Current position (positive = YES, negative = NO)
+        market_exposure_dollars = float(position['market_exposure_dollars'])  # Total cost basis
+        realized_pnl_dollars = float(position['realized_pnl_dollars'])  # Already realized P&L
+        fees_paid_dollars = float(position['fees_paid_dollars'])  # Fees paid
+        
+        # Calculate cost basis per share
+        if position_size != 0:
+            cost_basis_per_share = market_exposure_dollars / abs(position_size)
+        else:
+            cost_basis_per_share = 0
+        
+        # Calculate unrealized P&L
+        if position_size > 0:
+            # Long YES position
+            unrealized_pnl = (current_price - cost_basis_per_share) * position_size
+        elif position_size < 0:
+            # Short YES position (or long NO position)
+            current_price = 1 - current_price
+            unrealized_pnl = (current_price - cost_basis_per_share) * abs(position_size)
+        else:
+            # No position
+            unrealized_pnl = 0
+        
+        # Calculate market value
+        market_value = current_price * abs(position_size)
+        
+        # Calculate unrealized P&L percentage
+        if market_exposure_dollars > 0:
+            unrealized_pnl_percentage = (unrealized_pnl / market_exposure_dollars) * 100
+        else:
+            unrealized_pnl_percentage = 0
+        
+        return {
+            'ticker': ticker,
+            'position_size': position_size,
+            'cost_basis_per_share': cost_basis_per_share,
+            'total_cost_basis': market_exposure_dollars,
+            'current_price': current_price,
+            'unrealized_pnl': unrealized_pnl,
+            'realized_pnl': realized_pnl_dollars,
+            'fees_paid': fees_paid_dollars,
+            'net_pnl': unrealized_pnl + realized_pnl_dollars - fees_paid_dollars,
+            'unrealized_pnl_percentage': unrealized_pnl_percentage,
+            'market_value': market_value,
+            'position_data': position
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to calculate unrealized P&L for {ticker}: {e}")
+        return None
+
+def get_all_unrealized_pnl(client: KalshiHTTPClient) -> Optional[Dict[str, Any]]:
+    """Calculate unrealized P&L for all positions."""
+    try:
+        # Get all active positions
+        positions_data = get_all_positions(client)
+        if not positions_data:
+            return None
+        
+        active_positions = positions_data.get('active_positions', [])
+        
+        unrealized_pnl_data = {}
+        total_unrealized_pnl = 0.0
+        total_market_value = 0.0
+        
+        for position in active_positions:
+            ticker = position.get('ticker')
+            if not ticker:
+                continue
+            
+            # Calculate unrealized P&L for this position
+            pnl_data = calculate_unrealized_pnl(client, ticker)
+            if pnl_data:
+                unrealized_pnl_data[ticker] = pnl_data
+                total_unrealized_pnl += pnl_data['unrealized_pnl']
+                total_market_value += pnl_data['market_value']
+        
+        return {
+            'total_unrealized_pnl': total_unrealized_pnl,
+            'total_market_value': total_market_value,
+            'positions': unrealized_pnl_data,
+            'position_count': len(unrealized_pnl_data)
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get all unrealized P&L: {e}")
+        return None
+
 def filter_market_positions_by_date(market_positions: List[Dict[str, Any]], start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
     """Filter market positions by date range based on last_updated_ts."""
     if not start_date and not end_date:

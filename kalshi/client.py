@@ -13,10 +13,11 @@ from .market_functions import (
 )
 from .portfolio_functions import (
     get_balance_dollars, get_all_positions, get_settled_positions,
-    get_fills, get_settlements, filter_market_positions_by_date, get_recent_pnl
+    get_fills, get_settlements, filter_market_positions_by_date, get_recent_pnl,
+    calculate_unrealized_pnl, get_all_unrealized_pnl
 )
 from .data_enricher import enrich_positions, get_enriched_positions
-from .metrics_calculator import calculate_portfolio_metrics, calculate_filtered_portfolio_metrics, get_recent_trading_metrics
+from .metrics_calculator import calculate_portfolio_metrics, calculate_filtered_portfolio_metrics
 
 # Configure logging with centralized setup
 setup_logging(level=logging.INFO, include_filename=True)
@@ -87,6 +88,14 @@ class KalshiAPIClient:
     def get_recent_pnl(self, hours: int = 24) -> Optional[Dict[str, Any]]:
         """Get realized P&L from recent trading activity."""
         return get_recent_pnl(self.http_client, hours)
+    
+    def calculate_unrealized_pnl(self, ticker: str) -> Optional[Dict[str, Any]]:
+        """Calculate unrealized P&L for a specific position using position data and current market price."""
+        return calculate_unrealized_pnl(self.http_client, ticker)
+    
+    def get_all_unrealized_pnl(self) -> Optional[Dict[str, Any]]:
+        """Calculate unrealized P&L for all positions."""
+        return get_all_unrealized_pnl(self.http_client)
     
     # Data Enrichment Functions
     def enrich_positions(self, positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
