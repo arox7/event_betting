@@ -27,6 +27,7 @@ class Market(KalshiMarket):
     settlement_value_dollars: Optional[float] = None  # Settlement value in dollars
     
     
+    
     @computed_field
     @property
     def spread_percentage(self) -> Optional[float]:
@@ -104,6 +105,16 @@ class Market(KalshiMarket):
     def last_price_dollars(self) -> Optional[float]:
         """Convert last price from cents to dollars."""
         return self.last_price / 100.0 if self.last_price is not None else None
+
+    @computed_field
+    @property
+    def mid_price(self) -> Optional[float]:
+        """Calculate the mid price for Yes market in dollars."""
+        if self.yes_bid is None or self.yes_ask is None:
+            return None
+        
+        # Convert cents to dollars for mid price
+        return (self.yes_bid + self.yes_ask) / 200.0
     
     @computed_field
     @property

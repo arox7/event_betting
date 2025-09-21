@@ -2,12 +2,12 @@
 Kalshi API client using the official kalshi-python SDK.
 """
 import logging
-from multiprocessing import process
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 import kalshi_python
 import requests
 import base64
+import time
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -29,6 +29,14 @@ class KalshiAPIClient:
         self._private_key = None
         self._load_private_key()
         
+        # Simple in-memory cache with TTL
+        self._cache = {}
+        self._cache_ttl = {
+            'market': 300,      # 5 minutes for market data
+            'balance': 300,      # 1 minute for balance
+            'positions': 300,    # 30 seconds for positions
+            'events': 300       # 10 minutes for events
+        }
         
     def _initialize_client(self):
         """Initialize the official Kalshi client."""
@@ -72,7 +80,6 @@ class KalshiAPIClient:
         except Exception as e:
             logger.error(f"Failed to load private key: {e}")
             self._private_key = None
-    
     
     def _create_signature(self, timestamp: str, method: str, path: str) -> str:
         """Create the request signature for Kalshi API authentication."""
@@ -162,6 +169,29 @@ class KalshiAPIClient:
                 return False
         
         return True
+
+    def _preprocess_market_data(self, data):
+        """Recursively preprocess market data to handle known API inconsistencies."""
+        if isinstance(data, dict):
+            # Create a copy to avoid modifying the original
+            cleaned = data.copy()
+            
+            # Handle status field - map non-standard values to valid enum values
+            status = cleaned.get('status')
+            valid_statuses = {'initialized', 'active', 'closed', 'settled', 'determined'}
+            if status and status not in valid_statuses:
+                logger.info(f"Converting non-standard status '{status}' to 'closed' for ticker: {cleaned.get('ticker', 'unknown')}")
+                cleaned['status'] = 'closed'
+            
+            # Recursively clean nested structures
+            for key, value in cleaned.items():
+                cleaned[key] = self._preprocess_market_data(value)
+            
+            return cleaned
+        elif isinstance(data, list):
+            return [self._preprocess_market_data(item) for item in data]
+        else:
+            return data
     
     def get_markets(self, limit: int = 100, status: Optional[str] = None) -> List[Market]:
         """Fetch markets from Kalshi API."""
@@ -179,8 +209,9 @@ class KalshiAPIClient:
                     market_dict = market_data.to_dict()
                     
                     # Preprocess market data to handle known issues
-                    if self._is_market_valid(market_dict):
-                        markets.append(Market.model_validate(market_dict, strict=False))
+                    cleaned_market_dict = self._preprocess_market_data(market_dict)
+                    
+                    markets.append(Market.model_validate(cleaned_market_dict, strict=False))
                 except Exception as e:
                     ticker = getattr(market_data, 'ticker', 'unknown')
                     logger.warning(f"Skipping invalid market {ticker}: {e}")
@@ -199,6 +230,8 @@ class KalshiAPIClient:
             return []
             
         try:
+            import requests
+            
             all_events = []
             cursor = None
             
@@ -260,6 +293,10 @@ class KalshiAPIClient:
     
     def get_market_by_ticker(self, ticker: str) -> Optional[Market]:
         """Fetch a specific market by ticker using direct HTTP requests."""
+        # Check cache first
+        cached_market = self._get_cached('market', ticker)
+        if cached_market is not None:
+            return cached_market
         if not self.client:
             logger.error("Client not initialized")
             return None
@@ -283,9 +320,10 @@ class KalshiAPIClient:
                 if market_dict.get("status") == "finalized":
                     market_dict["status"] = "settled"
                 market = Market.model_validate(market_dict, strict=False)
+                # Cache the result
+                self._set_cache('market', market, ticker)
                 return market
             return None
-            
         except Exception as e:
             logger.error(f"Failed to fetch market {ticker}: {e}")
             return None
@@ -314,6 +352,10 @@ class KalshiAPIClient:
     
     def get_balance_dollars(self) -> Optional[float]:
         """Get account balance in dollars using raw HTTP requests."""
+        # Check cache first
+        cached_balance = self._get_cached('balance')
+        if cached_balance is not None:
+            return cached_balance
         if not self.config.KALSHI_API_KEY_ID or not self._private_key:
             logger.error("API credentials not properly configured")
             return None
@@ -328,9 +370,11 @@ class KalshiAPIClient:
                 return None
             
             data = response.json()
-            balance_cents = data['balance']
+            balance_cents = data.get('balance', 0)
             balance_dollars = balance_cents / 100.0  # Convert cents to dollars
             
+            # Cache the result
+            self._set_cache('balance', balance_dollars)
             return balance_dollars
             
         except Exception as e:
@@ -343,6 +387,10 @@ class KalshiAPIClient:
     
     def get_all_positions(self) -> Optional[Dict[str, Any]]:
         """Get all portfolio positions using raw HTTP requests with pagination."""
+        # Check cache first
+        cached_positions = self._get_cached('positions')
+        if cached_positions is not None:
+            return cached_positions
         if not self.config.KALSHI_API_KEY_ID or not self._private_key:
             logger.error("API credentials not properly configured")
             return None
@@ -391,13 +439,18 @@ class KalshiAPIClient:
                 'active_positions': active_positions,  # Only positions with actual holdings
                 'all_market_positions': all_market_positions,  # All market positions from API
                 'all_event_positions': all_event_positions,    # Event-level position data
+                'positions': active_positions,  # Alias for backward compatibility
+                'market_positions': all_market_positions,  # Alias for backward compatibility
+                'event_positions': all_event_positions,    # Alias for backward compatibility
                 'cursor': None  # No cursor since we got everything
             }
             
+            # Cache the result
+            self._set_cache('positions', result)
             return result
             
         except Exception as e:
-            logger.error(f"Failed to get unsettled positions: {e}")
+            logger.error(f"Failed to get all positions: {e}")
             return None
     
     def get_settled_positions(self) -> Optional[Dict[str, Any]]:
@@ -447,7 +500,6 @@ class KalshiAPIClient:
         except Exception as e:
             logger.error(f"Failed to get settled positions: {e}")
             return None
-    
     
     def get_enriched_positions(self) -> Optional[List[Dict[str, Any]]]:
         """Get positions enriched with market and event data."""
@@ -510,28 +562,29 @@ class KalshiAPIClient:
                 market_info = market_lookup.get(ticker)
                 if market_info:
                     enriched_position = {
+                        'position': position,
                         'market': market_info['market'],
                         'event': market_info['event'],
                         'ticker': ticker,
-                        'quantity': position['position'],
-                        'position': position['position'],
-                        'market_value': position['market_exposure'],  # Kalshi uses market_exposure
-                        'total_cost': position['total_traded'],  # Use total_traded as cost basis
+                        'quantity': position.get('position', 0),
+                        'market_value': position.get('market_exposure', 0),  # Kalshi uses market_exposure
+                        'total_cost': position.get('total_traded', 0),  # Use total_traded as cost basis
                         'unrealized_pnl': 0,  # Calculate this based on current market price vs cost
-                        'realized_pnl': position['realized_pnl']
+                        'realized_pnl': position.get('realized_pnl', 0)
                     }
                     enriched_positions.append(enriched_position)
                 else:
                     # Position without matching market (might be settled/closed)
                     enriched_position = {
+                        'position': position,
                         'market': None,
                         'event': None,
                         'ticker': ticker,
-                        'quantity': position['position'],
-                        'position': position['position'],
-                        'market_value': position['market_exposure'],  # Kalshi uses market_exposure
-                        'total_cost': position['total_traded'],  # Use total_traded as cost basis
-                        'realized_pnl': position['realized_pnl']
+                        'quantity': position.get('position', 0),
+                        'market_value': position.get('market_exposure', 0),  # Kalshi uses market_exposure
+                        'total_cost': position.get('total_traded', 0),  # Use total_traded as cost basis
+                        'unrealized_pnl': 0,  # Can't calculate without market data
+                        'realized_pnl': position.get('realized_pnl', 0)
                     }
                     enriched_positions.append(enriched_position)
             
@@ -675,6 +728,87 @@ class KalshiAPIClient:
                 'total_realized_pnl': total_realized_pnl_dollars,  # In dollars (after fees)
                 'total_fees_paid': total_fees_paid_dollars,  # In dollars
                 'total_positions': total_active_positions,
+=======
+    def get_portfolio_summary(self) -> Optional[Dict[str, Any]]:
+        """Get comprehensive portfolio summary including positions and PnL."""
+        try:
+            # Get cash balance
+            cash_balance = self.get_balance()
+            if cash_balance is None:
+                return None
+            
+            # Get positions
+            positions_data = self.get_all_positions()
+            if positions_data is None:
+                return None
+            
+            positions = positions_data.get('positions', [])
+            
+            # Calculate position values
+            total_position_value = 0
+            total_unrealized_pnl = 0
+            position_count = len(positions)
+            
+            for position in positions:
+                # Position value should use market_exposure (already in cents from API)
+                market_exposure_cents = position.get('market_exposure', 0)
+                position_value = abs(market_exposure_cents) / 100.0  # Convert cents to dollars
+                total_position_value += position_value
+                
+                # Unrealized PnL (if available in the response)
+                unrealized_pnl_cents = position.get('unrealized_pnl', 0)
+                total_unrealized_pnl += unrealized_pnl_cents / 100.0
+            
+            total_balance = cash_balance + total_position_value
+            
+            return {
+                'cash_balance': cash_balance,
+                'total_position_value': total_position_value,
+                'total_balance': total_balance,
+                'unrealized_pnl': total_unrealized_pnl,
+                'position_count': position_count,
+                'positions': positions
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get portfolio summary: {e}")
+            return None
+    
+    def get_portfolio_metrics(self) -> Optional[Dict[str, Any]]:
+        """Get comprehensive portfolio metrics including cash, positions, and P&L."""
+        try:
+            # Get cash balance
+            cash_balance = self.get_balance()
+            if cash_balance is None:
+                return None
+            
+            # Get enriched positions for detailed calculations
+            enriched_positions = self.get_enriched_positions()
+            if enriched_positions is None:
+                return None
+            
+            # Calculate metrics from enriched positions
+            total_positions = len(enriched_positions)
+            total_market_value = sum(abs(pos.get('market_value', 0)) for pos in enriched_positions) / 100.0
+            total_unrealized_pnl = sum(pos.get('unrealized_pnl', 0) for pos in enriched_positions) / 100.0
+            total_realized_pnl = sum(pos.get('realized_pnl', 0) for pos in enriched_positions) / 100.0
+            
+            # Calculate portfolio totals
+            total_portfolio_value = cash_balance + total_market_value
+            
+            # Calculate win/loss metrics
+            winning_positions = len([pos for pos in enriched_positions if pos.get('unrealized_pnl', 0) > 0])
+            losing_positions = len([pos for pos in enriched_positions if pos.get('unrealized_pnl', 0) < 0])
+            win_rate = (winning_positions / total_positions) * 100 if total_positions > 0 else 0
+            portfolio_return = (total_unrealized_pnl / total_market_value) * 100 if total_market_value > 0 else 0
+            
+            return {
+                'cash_balance': cash_balance,
+                'total_market_value': total_market_value,
+                'total_portfolio_value': total_portfolio_value,
+                'total_unrealized_pnl': total_unrealized_pnl,
+                'total_realized_pnl': total_realized_pnl,
+                'total_positions': total_positions,
                 'winning_positions': winning_positions,
                 'losing_positions': losing_positions,
                 'win_rate': win_rate,
@@ -692,7 +826,72 @@ class KalshiAPIClient:
         except Exception as e:
             logger.error(f"Failed to get portfolio metrics: {e}")
             return None
-  
+
+    def get_recent_pnl(self, hours: int = 24) -> Optional[Dict[str, Any]]:
+        """Get realized P&L from recent trading activity."""
+        try:
+            from datetime import datetime, timezone, timedelta
+            
+            # Get recent fills to calculate realized PnL
+            fills_data = self.get_fills(limit=200)
+            if fills_data is None:
+                return {'realized_pnl': 0, 'trade_count': 0, 'trades': []}
+            
+            fills = fills_data.get('fills', [])
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+            
+            recent_fills = []
+            total_realized_pnl = 0
+            
+            for fill in fills:
+                # fill is already a Fill object from the SDK, not a dict
+                if not fill.created_time:
+                    continue
+                    
+                try:
+                    if fill.created_time >= cutoff_time:
+                        recent_fills.append(fill)
+                        
+                        # Extract fill details - these are already the correct types
+                        ticker = fill.ticker
+                        side = fill.side  # 'yes' or 'no'
+                        count = fill.count or 0
+                        price = fill.price or 0  # in cents
+                        
+                        if not ticker or count == 0:
+                            continue
+                        
+                        # Calculate trade value in dollars
+                        trade_value = (count * price) / 100.0
+                        
+                        # Calculate realized P&L from trading activity
+                        # Buying costs money (negative P&L), selling generates revenue (positive P&L)
+                        if side == 'yes':
+                            # Bought Yes shares - this is a cost
+                            total_realized_pnl -= trade_value
+                        else:
+                            # Selling positions or buying No shares - treat as revenue
+                            total_realized_pnl += trade_value
+                            
+                except Exception as e:
+                    logger.warning(f"Failed to parse fill: {e}")
+                    continue
+            
+            # Calculate some basic stats
+            trade_volume = sum(((fill.count or 0) * (fill.price or 0)) / 100.0 for fill in recent_fills)
+            
+            return {
+                'realized_pnl': total_realized_pnl,
+                'trade_count': len(recent_fills),
+                'trade_volume': trade_volume,
+                'recent_fills': [fill.to_dict() for fill in recent_fills[:10]]  # Return last 10 fills for display
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get recent PnL: {e}")
+            return {'realized_pnl': 0, 'trade_count': 0, 'trades': []}
+    
+>>>>>>> e8855864bffa840883e3771339c26a5ddf7a746c
     def health_check(self) -> bool:
         """Check if the API client is working properly."""
         try:
