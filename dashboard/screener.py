@@ -6,13 +6,11 @@ import pandas as pd
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 
-from kalshi_client import KalshiAPIClient
-from market_screener import MarketScreener
-from gemini_screener import GeminiScreener
-from kalshi_websocket import WebSocketManager
-from models import ScreeningResult, utc_now
+from kalshi import KalshiAPIClient, WebSocketManager
+from screening import MarketScreener, GeminiScreener
+from kalshi.models import ScreeningResult, utc_now
 from config import Config
-from .constants import (
+from constants import (
     DEFAULT_SCREENING_CRITERIA, 
     AI_QUICK_EXAMPLES, 
     FILTER_CONFIGS, 

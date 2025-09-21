@@ -1,0 +1,9 @@
+---
+description: How to set up the environment to run tests and scripts
+globs:
+alwaysApply: true
+---
+
+Run this when testing code to set up your proper environment: 
+    - source ~/.bash_profile 
+    - conda activate event_betting

@@ -7,8 +7,8 @@ outside of the Streamlit context. The core functionality is still tested properl
 """
 import logging
 from config import Config, setup_logging
-from kalshi_client import KalshiAPIClient
-from market_screener import MarketScreener
+from kalshi import KalshiAPIClient
+from screening import MarketScreener
 
 # Configure logging with centralized setup
 setup_logging(level=logging.INFO, include_filename=True)

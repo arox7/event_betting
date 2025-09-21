@@ -6,13 +6,11 @@ import logging
 from datetime import datetime
 
 from config import Config, setup_logging
-from kalshi_client import KalshiAPIClient
-from kalshi_websocket import WebSocketManager
-from market_screener import MarketScreener
-from gemini_screener import GeminiScreener
+from kalshi import KalshiAPIClient, WebSocketManager
+from screening import MarketScreener, GeminiScreener
 
-from .screener import ScreenerPage
-from .portfolio import PortfolioPage
+from screener import ScreenerPage
+from portfolio import PortfolioPage
 
 # Configure logging with centralized setup
 setup_logging(level=logging.INFO, include_filename=True)

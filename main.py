@@ -5,6 +5,7 @@ import logging
 import sys
 import subprocess
 import os
+import argparse
 
 from config import Config, setup_logging
 
@@ -43,7 +44,6 @@ class DashboardApp:
 
 def main():
     """Main function."""
-    import argparse
     
     parser = argparse.ArgumentParser(description='Kalshi Market Analysis Dashboard')
     parser.add_argument('--port', type=int, default=8501,

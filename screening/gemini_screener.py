@@ -6,11 +6,19 @@ import re
 import ast
 import json
 import os
+import math
+import statistics
 from typing import List, Callable, Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
 import google.generativeai as genai
 
-from models import Market, Event, ScreeningResult
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+
+from kalshi.models import Market, Event, ScreeningResult
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -374,9 +382,6 @@ Please generate a Python screening function based on the above request. The func
     def _create_safe_execution_environment(self) -> dict:
         """Create a safe execution environment for generated code."""
         # Import datetime components that might be needed
-        from datetime import datetime, timezone, timedelta
-        import math
-        import re
         
         # Create safe builtins - start with full builtins then disable dangerous ones
         safe_builtins = __builtins__.copy() if isinstance(__builtins__, dict) else __builtins__.__dict__.copy()
@@ -450,7 +455,8 @@ Please generate a Python screening function based on the above request. The func
         
         # Add numpy if available
         try:
-            import numpy as np
+            if NUMPY_AVAILABLE:
+                np
             safe_env['np'] = np
             safe_env['numpy'] = np
         except ImportError:
@@ -458,7 +464,6 @@ Please generate a Python screening function based on the above request. The func
         
         # Add statistics if available
         try:
-            import statistics
             safe_env['statistics'] = statistics
         except ImportError:
             logger.debug("Statistics not available in screening environment")

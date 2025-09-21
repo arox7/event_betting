@@ -5,8 +5,8 @@ import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 
-from models import Market, ScreeningCriteria, ScreeningResult, Event, utc_now
-from kalshi_client import KalshiAPIClient
+from kalshi.models import Market, Event, utc_now, ScreeningCriteria, ScreeningResult
+from kalshi import KalshiAPIClient
 from config import Config, setup_logging
 
 # Configure logging with centralized setup

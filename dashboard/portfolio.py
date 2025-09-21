@@ -11,9 +11,8 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from kalshi_client import KalshiAPIClient
-from kalshi_websocket import WebSocketManager
-from models import utc_now, MarketPosition
+from kalshi import KalshiAPIClient, WebSocketManager
+from kalshi.models import utc_now, MarketPosition
 
 # Note: portfolio.py doesn't need to configure logging as it's imported by dashboard modules
 # that will configure logging. We just get the logger here.
