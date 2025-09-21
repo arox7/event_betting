@@ -5,7 +5,7 @@ import streamlit as st
 import logging
 from datetime import datetime
 
-from config import Config
+from config import Config, setup_logging
 from kalshi_client import KalshiAPIClient
 from kalshi_websocket import WebSocketManager
 from market_screener import MarketScreener
@@ -14,11 +14,8 @@ from gemini_screener import GeminiScreener
 from .screener import ScreenerPage
 from .portfolio import PortfolioPage
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
-)
+# Configure logging with centralized setup
+setup_logging(level=logging.INFO, include_filename=True)
 logger = logging.getLogger(__name__)
 
 class SimpleDashboard:

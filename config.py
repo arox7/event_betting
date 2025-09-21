@@ -2,10 +2,30 @@
 Configuration settings for the Kalshi market making bot.
 """
 import os
+import logging
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+def setup_logging(level=logging.INFO, include_filename=True):
+    """
+    Set up consistent logging configuration across the application.
+    
+    Args:
+        level: Logging level (default: INFO)
+        include_filename: Whether to include filename and line number in logs
+    """
+    if include_filename:
+        format_string = '%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+    else:
+        format_string = '%(asctime)s - %(levelname)s - %(message)s'
+    
+    logging.basicConfig(
+        level=level,
+        format=format_string,
+        force=True  # Override any existing configuration
+    )
 
 class Config:
     """Configuration class for the application."""

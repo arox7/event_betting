@@ -16,14 +16,11 @@ import argparse
 from datetime import datetime, timezone
 from typing import Dict, Any
 
-from config import Config
+from config import Config, setup_logging
 from kalshi_websocket import KalshiWebSocketClient
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
-)
+# Configure logging with centralized setup
+setup_logging(level=logging.INFO, include_filename=True)
 logger = logging.getLogger(__name__)
 
 class WebSocketStreamTester:

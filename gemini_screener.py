@@ -30,7 +30,7 @@ def setup_gemini_logging():
     file_handler.setLevel(logging.INFO)
     
     # Create formatter
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
     file_handler.setFormatter(formatter)
     
     # Add handler to logger

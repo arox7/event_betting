@@ -6,15 +6,12 @@ These warnings occur because some modules import Streamlit components, but we're
 outside of the Streamlit context. The core functionality is still tested properly.
 """
 import logging
-from config import Config
+from config import Config, setup_logging
 from kalshi_client import KalshiAPIClient
 from market_screener import MarketScreener
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
-)
+# Configure logging with centralized setup
+setup_logging(level=logging.INFO, include_filename=True)
 logger = logging.getLogger(__name__)
 
 def test_setup():

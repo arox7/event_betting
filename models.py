@@ -9,6 +9,8 @@ from kalshi_python.models.market import Market as KalshiMarket
 from kalshi_python.models.event import Event as KalshiEvent
 from pydantic import BaseModel, computed_field, field_validator, ValidationError
 
+# Note: models.py doesn't need to configure logging as it's imported by other modules
+# that will configure logging. We just get the logger here.
 logger = logging.getLogger(__name__)
 
 def utc_now() -> datetime:

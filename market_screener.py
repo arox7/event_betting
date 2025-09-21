@@ -7,8 +7,10 @@ from datetime import datetime, timezone
 
 from models import Market, ScreeningCriteria, ScreeningResult, Event, utc_now
 from kalshi_client import KalshiAPIClient
-from config import Config
+from config import Config, setup_logging
 
+# Configure logging with centralized setup
+setup_logging(level=logging.INFO, include_filename=True)
 logger = logging.getLogger(__name__)
 
 class MarketScreener:

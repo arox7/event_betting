@@ -12,11 +12,13 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import padding
 
-from config import Config
+from config import Config, setup_logging
 from models import Market, Event, MarketPosition
 from pprint import pprint
 
 
+# Configure logging with centralized setup
+setup_logging(level=logging.INFO, include_filename=True)
 logger = logging.getLogger(__name__)
 
 class KalshiAPIClient:
@@ -427,7 +429,7 @@ class KalshiAPIClient:
                 return None
             
             data = response.json()
-            balance_cents = data.get('balance', 0)
+            balance_cents = data['balance']
             balance_dollars = balance_cents / 100.0  # Convert cents to dollars
             
             # Cache the result
@@ -490,7 +492,7 @@ class KalshiAPIClient:
             
             # Filter client-side for positions with actual position != 0
             # The API count_up/count_down parameters might include resting orders
-            active_positions = [pos for pos in all_market_positions if pos.get('position', 0) != 0]
+            active_positions = [pos for pos in all_market_positions if pos['position'] != 0]
             
             result = {
                 'active_positions': active_positions,  # Only positions with actual holdings
@@ -623,11 +625,11 @@ class KalshiAPIClient:
                         'market': market_info['market'],
                         'event': market_info['event'],
                         'ticker': ticker,
-                        'quantity': position.get('position', 0),
-                        'market_value': position.get('market_exposure', 0),  # Kalshi uses market_exposure
-                        'total_cost': position.get('total_traded', 0),  # Use total_traded as cost basis
+                        'quantity': position['position'],
+                        'market_value': position['market_exposure'],  # Kalshi uses market_exposure
+                        'total_cost': position['total_traded'],  # Use total_traded as cost basis
                         'unrealized_pnl': 0,  # Calculate this based on current market price vs cost
-                        'realized_pnl': position.get('realized_pnl', 0)
+                        'realized_pnl': position['realized_pnl']
                     }
                     enriched_positions.append(enriched_position)
                 else:
@@ -637,11 +639,11 @@ class KalshiAPIClient:
                         'market': None,
                         'event': None,
                         'ticker': ticker,
-                        'quantity': position.get('position', 0),
-                        'market_value': position.get('market_exposure', 0),  # Kalshi uses market_exposure
-                        'total_cost': position.get('total_traded', 0),  # Use total_traded as cost basis
+                        'quantity': position['position'],
+                        'market_value': position['market_exposure'],  # Kalshi uses market_exposure
+                        'total_cost': position['total_traded'],  # Use total_traded as cost basis
                         'unrealized_pnl': 0,  # Can't calculate without market data
-                        'realized_pnl': position.get('realized_pnl', 0)
+                        'realized_pnl': position['realized_pnl']
                     }
                     enriched_positions.append(enriched_position)
             
@@ -825,12 +827,13 @@ class KalshiAPIClient:
             
             for position in positions:
                 # Position value should use market_exposure (already in cents from API)
-                market_exposure_cents = position.get('market_exposure', 0)
+                market_exposure_cents = position['market_exposure']
                 position_value = abs(market_exposure_cents) / 100.0  # Convert cents to dollars
                 total_position_value += position_value
                 
-                # Unrealized PnL (if available in the response)
-                unrealized_pnl_cents = position.get('unrealized_pnl', 0)
+                # Unrealized PnL (not available in raw market positions, set to 0)
+                # Note: Raw market positions don't include unrealized P&L, only realized P&L
+                unrealized_pnl_cents = 0  # Raw positions don't have unrealized P&L
                 total_unrealized_pnl += unrealized_pnl_cents / 100.0
             
             total_balance = cash_balance + total_position_value
@@ -876,8 +879,8 @@ class KalshiAPIClient:
                         # Extract fill details - these are already the correct types
                         ticker = fill.ticker
                         side = fill.side  # 'yes' or 'no'
-                        count = fill.count or 0
-                        price = fill.price or 0  # in cents
+                        count = fill.count
+                        price = fill.price  # in cents
                         
                         if not ticker or count == 0:
                             continue
@@ -899,7 +902,7 @@ class KalshiAPIClient:
                     continue
             
             # Calculate some basic stats
-            trade_volume = sum(((fill.count or 0) * (fill.price or 0)) / 100.0 for fill in recent_fills)
+            trade_volume = sum((fill.count * fill.price) / 100.0 for fill in recent_fills)
             
             return {
                 'realized_pnl': total_realized_pnl,

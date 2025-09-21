@@ -11,6 +11,8 @@ from kalshi_client import KalshiAPIClient
 from kalshi_websocket import WebSocketManager
 from models import utc_now, MarketPosition
 
+# Note: portfolio.py doesn't need to configure logging as it's imported by dashboard modules
+# that will configure logging. We just get the logger here.
 logger = logging.getLogger(__name__)
 
 class PortfolioPage:
@@ -285,8 +287,8 @@ class PortfolioPage:
                 ticker = pos['ticker']
                 
                 # Extract values directly (values are in cents from kalshi_client)
-                quantity = pos['quantity']
-                position = pos['position']
+                quantity = pos['quantity']  # This is the actual position value (int)
+                position_value = pos['quantity']  # Use quantity as the position value for comparisons
                 market_value_cents = pos['market_value']  # In cents
                 realized_pnl_cents = pos['realized_pnl']  # In cents
                 total_cost_cents = pos['total_cost']  # In cents
@@ -311,11 +313,11 @@ class PortfolioPage:
                 else:
                     display_title = ticker
                 
-                # Determine position direction
-                if position > 0:
+                # Determine position direction using quantity (which is the actual position value)
+                if quantity > 0:
                     direction = "LONG"
                     direction_color = "🟢"
-                elif position < 0:
+                elif quantity < 0:
                     direction = "SHORT"
                     direction_color = "🔴"
                 else:
@@ -405,48 +407,39 @@ class PortfolioPage:
             # Process market positions data for display
             table_data = []
             for pos_data in closed_positions:
-                try:
-                    # Create MarketPosition object for validation
-                    market_pos = MarketPosition.model_validate(pos_data)
-                    
-                    # Calculate net realized P&L (realized P&L - fees)
-                    net_realized_pnl = market_pos.net_realized_pnl_dollars
-                    
-                    # Calculate average price from total traded and position history
-                    # For closed positions, we can't easily calculate exact average price from this data
-                    # so we'll show total traded value instead
-                    total_traded = market_pos.total_traded_dollars_float
-                    
-                    # Parse timestamp and format
-                    try:
-                        from datetime import datetime
-                        dt = datetime.fromisoformat(market_pos.last_updated_ts.replace('Z', '+00:00'))
-                        formatted_time = dt.strftime('%Y-%m-%d %H:%M UTC')
-                    except Exception as e:
-                        logger.error(f"Market position {market_pos.ticker} invalid timestamp format '{market_pos.last_updated_ts}': {e}")
-                        formatted_time = "Unknown"
-                    
-                    # Create display title from ticker (we don't have market title in this data)
-                    display_title = market_pos.ticker
-                    
-                    # Determine position direction based on trading history
-                    # Since position is 0, we can't determine original direction easily
-                    direction = "CLOSED"
-                    direction_color = "⚪"
-                    
-                    table_data.append({
-                        'Ticker': f"https://kalshi.com/markets/{market_pos.ticker}",
-                        'Market': display_title,
-                        'Direction': f"{direction_color} {direction}",
-                        'Total Traded': f"${total_traded:.2f}",
-                        'Fees Paid': f"${market_pos.fees_paid_dollars_float:.2f}",
-                        'Net Realized P&L': f"${net_realized_pnl:.2f}",
-                        'Last Updated': formatted_time
-                    })
-                except Exception as e:
-                    ticker = pos_data['ticker']
-                    st.warning(f"Error processing market position {ticker}: {e}")
-                    continue
+                # Create MarketPosition object for validation
+                market_pos = MarketPosition.model_validate(pos_data)
+                
+                # Calculate net realized P&L (realized P&L - fees)
+                net_realized_pnl = market_pos.net_realized_pnl_dollars
+                
+                # Calculate average price from total traded and position history
+                # For closed positions, we can't easily calculate exact average price from this data
+                # so we'll show total traded value instead
+                total_traded = market_pos.total_traded_dollars_float
+                
+                # Parse timestamp and format
+                from datetime import datetime
+                dt = datetime.fromisoformat(market_pos.last_updated_ts.replace('Z', '+00:00'))
+                formatted_time = dt.strftime('%Y-%m-%d %H:%M UTC')
+                
+                # Create display title from ticker (we don't have market title in this data)
+                display_title = market_pos.ticker
+                
+                # Determine position direction based on trading history
+                # Since position is 0, we can't determine original direction easily
+                direction = "CLOSED"
+                direction_color = "⚪"
+                
+                table_data.append({
+                    'Ticker': f"https://kalshi.com/markets/{market_pos.ticker}",
+                    'Market': display_title,
+                    'Direction': f"{direction_color} {direction}",
+                    'Total Traded': f"${total_traded:.2f}",
+                    'Fees Paid': f"${market_pos.fees_paid_dollars_float:.2f}",
+                    'Net Realized P&L': f"${net_realized_pnl:.2f}",
+                    'Last Updated': formatted_time
+                })
             
             if not table_data:
                 st.info("No valid closed positions to display")
@@ -526,38 +519,33 @@ class PortfolioPage:
             cumulative_pnl = 0
             
             # Sort positions by last updated timestamp
-            sorted_positions = sorted(closed_positions, key=lambda x: x.get('last_updated_ts', ''))
+            sorted_positions = sorted(closed_positions, key=lambda x: x['last_updated_ts'])
             
             for pos in sorted_positions:
-                try:
-                    # Parse timestamp
-                    last_updated_str = pos['last_updated_ts']
-                    if last_updated_str.endswith('Z'):
-                        last_updated_str = last_updated_str[:-1] + '+00:00'
-                    
-                    timestamp = datetime.fromisoformat(last_updated_str)
-                    
-                    # Calculate net P&L for this position (realized P&L - fees)
-                    realized_pnl = pos.get('realized_pnl', 0)
-                    fees_paid = pos.get('fees_paid', 0)
-                    net_pnl = realized_pnl - fees_paid
-                    
-                    # Convert to dollars
-                    net_pnl_dollars = net_pnl / 100.0
-                    cumulative_pnl += net_pnl_dollars
-                    
-                    chart_data.append({
-                        'Date': timestamp,
-                        'Position P&L': net_pnl_dollars,
-                        'Cumulative P&L': cumulative_pnl,
-                        'Ticker': pos.get('ticker', 'Unknown'),
-                        'Realized P&L': realized_pnl / 100.0,
-                        'Fees Paid': fees_paid / 100.0
-                    })
-                    
-                except Exception as e:
-                    logger.warning(f"Error processing position {pos.get('ticker', 'Unknown')} for chart: {e}")
-                    continue
+                # Parse timestamp
+                last_updated_str = pos['last_updated_ts']
+                if last_updated_str.endswith('Z'):
+                    last_updated_str = last_updated_str[:-1] + '+00:00'
+                
+                timestamp = datetime.fromisoformat(last_updated_str)
+                
+                # Calculate net P&L for this position (realized P&L - fees)
+                realized_pnl = pos['realized_pnl']
+                fees_paid = pos['fees_paid']
+                net_pnl = realized_pnl - fees_paid
+                
+                # Convert to dollars
+                net_pnl_dollars = net_pnl / 100.0
+                cumulative_pnl += net_pnl_dollars
+                
+                chart_data.append({
+                    'Date': timestamp,
+                    'Position P&L': net_pnl_dollars,
+                    'Cumulative P&L': cumulative_pnl,
+                    'Ticker': pos['ticker'],
+                    'Realized P&L': realized_pnl / 100.0,
+                    'Fees Paid': fees_paid / 100.0
+                })
             
             if not chart_data:
                 st.info("No valid position data available for chart")

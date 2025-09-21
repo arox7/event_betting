@@ -6,16 +6,10 @@ import sys
 import subprocess
 import os
 
-from config import Config
+from config import Config, setup_logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# Configure logging with centralized setup
+setup_logging(level=logging.INFO, include_filename=True)
 
 logger = logging.getLogger(__name__)
 
