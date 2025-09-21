@@ -728,7 +728,24 @@ class KalshiAPIClient:
                 'total_realized_pnl': total_realized_pnl_dollars,  # In dollars (after fees)
                 'total_fees_paid': total_fees_paid_dollars,  # In dollars
                 'total_positions': total_active_positions,
-=======
+                'winning_positions': winning_positions,
+                'losing_positions': losing_positions,
+                'win_rate': win_rate,
+                'portfolio_return': portfolio_return,
+                'enriched_positions': enriched_positions,
+                'market_positions': all_market_positions,  # All market positions (unfiltered)
+                'filtered_market_positions': filtered_market_positions,  # Date-filtered market positions
+                'closed_positions': closed_positions,  # Closed positions from filtered data
+                'total_filtered_positions': len(filtered_market_positions),
+                'total_closed_positions': len(closed_positions),
+                'date_range_start': start_date,
+                'date_range_end': end_date
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get portfolio metrics: {e}")
+            return None
+
     def get_portfolio_summary(self) -> Optional[Dict[str, Any]]:
         """Get comprehensive portfolio summary including positions and PnL."""
         try:
@@ -774,59 +791,6 @@ class KalshiAPIClient:
             logger.error(f"Failed to get portfolio summary: {e}")
             return None
     
-    def get_portfolio_metrics(self) -> Optional[Dict[str, Any]]:
-        """Get comprehensive portfolio metrics including cash, positions, and P&L."""
-        try:
-            # Get cash balance
-            cash_balance = self.get_balance()
-            if cash_balance is None:
-                return None
-            
-            # Get enriched positions for detailed calculations
-            enriched_positions = self.get_enriched_positions()
-            if enriched_positions is None:
-                return None
-            
-            # Calculate metrics from enriched positions
-            total_positions = len(enriched_positions)
-            total_market_value = sum(abs(pos.get('market_value', 0)) for pos in enriched_positions) / 100.0
-            total_unrealized_pnl = sum(pos.get('unrealized_pnl', 0) for pos in enriched_positions) / 100.0
-            total_realized_pnl = sum(pos.get('realized_pnl', 0) for pos in enriched_positions) / 100.0
-            
-            # Calculate portfolio totals
-            total_portfolio_value = cash_balance + total_market_value
-            
-            # Calculate win/loss metrics
-            winning_positions = len([pos for pos in enriched_positions if pos.get('unrealized_pnl', 0) > 0])
-            losing_positions = len([pos for pos in enriched_positions if pos.get('unrealized_pnl', 0) < 0])
-            win_rate = (winning_positions / total_positions) * 100 if total_positions > 0 else 0
-            portfolio_return = (total_unrealized_pnl / total_market_value) * 100 if total_market_value > 0 else 0
-            
-            return {
-                'cash_balance': cash_balance,
-                'total_market_value': total_market_value,
-                'total_portfolio_value': total_portfolio_value,
-                'total_unrealized_pnl': total_unrealized_pnl,
-                'total_realized_pnl': total_realized_pnl,
-                'total_positions': total_positions,
-                'winning_positions': winning_positions,
-                'losing_positions': losing_positions,
-                'win_rate': win_rate,
-                'portfolio_return': portfolio_return,
-                'enriched_positions': enriched_positions,
-                'market_positions': all_market_positions,  # All market positions (unfiltered)
-                'filtered_market_positions': filtered_market_positions,  # Date-filtered market positions
-                'closed_positions': closed_positions,  # Closed positions from filtered data
-                'total_filtered_positions': len(filtered_market_positions),
-                'total_closed_positions': len(closed_positions),
-                'date_range_start': start_date,
-                'date_range_end': end_date
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to get portfolio metrics: {e}")
-            return None
-
     def get_recent_pnl(self, hours: int = 24) -> Optional[Dict[str, Any]]:
         """Get realized P&L from recent trading activity."""
         try:
@@ -891,7 +855,6 @@ class KalshiAPIClient:
             logger.error(f"Failed to get recent PnL: {e}")
             return {'realized_pnl': 0, 'trade_count': 0, 'trades': []}
     
->>>>>>> e8855864bffa840883e3771339c26a5ddf7a746c
     def health_check(self) -> bool:
         """Check if the API client is working properly."""
         try:
