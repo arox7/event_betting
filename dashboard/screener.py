@@ -6,7 +6,7 @@ import pandas as pd
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 
-from kalshi import KalshiAPIClient, WebSocketManager
+from kalshi import KalshiAPIClient
 from screening import MarketScreener, GeminiScreener
 from kalshi.models import ScreeningResult, utc_now
 from config import Config
@@ -21,12 +21,11 @@ class ScreenerPage:
     """Market screening page with AI and rule-based filters."""
     
     def __init__(self, kalshi_client: KalshiAPIClient, screener: MarketScreener, 
-                 gemini_screener: GeminiScreener, ws_manager: WebSocketManager, config: Config):
+                 gemini_screener: GeminiScreener, config: Config):
         """Initialize the screener page."""
         self.kalshi_client = kalshi_client
         self.screener = screener
         self.gemini_screener = gemini_screener
-        self.ws_manager = ws_manager
         self.config = config
         
         # Initialize session state for screener

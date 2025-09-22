@@ -27,7 +27,10 @@ logger = logging.getLogger(__name__)
 def setup_gemini_logging():
     """Set up file logging for Gemini API interactions."""
     gemini_logger = logging.getLogger('gemini_interactions')
-    gemini_logger.setLevel(logging.WARNING)  # Only log warnings and errors
+    gemini_logger.setLevel(logging.DEBUG)  # Log all interactions for debugging
+    
+    # Clear existing handlers to avoid duplicates
+    gemini_logger.handlers.clear()
     
     # Create logs directory if it doesn't exist
     os.makedirs('logs', exist_ok=True)
@@ -35,14 +38,20 @@ def setup_gemini_logging():
     # Create file handler
     log_file = f"logs/gemini_interactions_{datetime.now().strftime('%Y%m%d')}.log"
     file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.INFO)
+    file_handler.setLevel(logging.DEBUG)
     
-    # Create formatter
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
+    # Create detailed formatter with timestamps
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
     file_handler.setFormatter(formatter)
     
     # Add handler to logger
     gemini_logger.addHandler(file_handler)
+    
+    # Prevent propagation to root logger to avoid duplicate messages
+    gemini_logger.propagate = False
     
     return gemini_logger
 
@@ -114,26 +123,37 @@ Example format:
 Be specific about the exact values used in the code.
 """
 
-            # Log the input (reduced verbosity)
-            gemini_logger.debug(f"EXPLAIN_CRITERIA - INPUT: {user_prompt[:50]}...")
+            # Log detailed interaction information
+            gemini_logger.info(f"=== EXPLAIN_CRITERIA INTERACTION START ===")
+            gemini_logger.info(f"Timestamp: {datetime.now().isoformat()}")
+            gemini_logger.info(f"User Prompt: {user_prompt}")
+            gemini_logger.info(f"Generated Code Length: {len(screening_code)} characters")
+            gemini_logger.info(f"Full Prompt Length: {len(prompt)} characters")
 
             response = self.model.generate_content(prompt)
             
             if response and response.text:
                 explanation = response.text.strip()
-                # Log the output (reduced verbosity)
-                gemini_logger.debug(f"EXPLAIN_CRITERIA - OUTPUT: {len(explanation)} chars")
+                # Log detailed response information
+                gemini_logger.info(f"Response Status: SUCCESS")
+                gemini_logger.info(f"Response Length: {len(explanation)} characters")
+                gemini_logger.info(f"Response Content: {explanation}")
+                gemini_logger.info(f"=== EXPLAIN_CRITERIA INTERACTION END ===")
                 return explanation
             else:
-                gemini_logger.warning(f"EXPLAIN_CRITERIA - EMPTY RESPONSE:")
-                gemini_logger.warning(f"Response object: {response}")
+                gemini_logger.error(f"Response Status: EMPTY")
+                gemini_logger.error(f"Response object: {response}")
+                gemini_logger.error(f"=== EXPLAIN_CRITERIA INTERACTION END ===")
                 logger.warning("Empty response from Gemini for criteria explanation")
                 return None
                 
         except Exception as e:
-            gemini_logger.error(f"EXPLAIN_CRITERIA - ERROR:")
+            gemini_logger.error(f"=== EXPLAIN_CRITERIA ERROR ===")
+            gemini_logger.error(f"Timestamp: {datetime.now().isoformat()}")
             gemini_logger.error(f"Error: {str(e)}")
-            gemini_logger.error(f"Error type: {type(e)}")
+            gemini_logger.error(f"Error Type: {type(e).__name__}")
+            gemini_logger.error(f"User Prompt: {user_prompt}")
+            gemini_logger.error(f"=== EXPLAIN_CRITERIA ERROR END ===")
             logger.error(f"Error generating criteria explanation: {e}")
             return None
     
@@ -162,8 +182,11 @@ USER REQUEST: {user_prompt}
 Please generate a Python screening function based on the above request. The function should be named `screen_markets` and take a list of Market objects as input."""
         
         try:
-            # Log the input (reduced verbosity)
-            gemini_logger.debug(f"GENERATE_SCREENING - INPUT: {user_prompt[:50]}...")
+            # Log detailed interaction information
+            gemini_logger.info(f"=== GENERATE_SCREENING INTERACTION START ===")
+            gemini_logger.info(f"Timestamp: {datetime.now().isoformat()}")
+            gemini_logger.info(f"User Prompt: {user_prompt}")
+            gemini_logger.info(f"Full Prompt Length: {len(full_prompt)} characters")
             
             # Validate user prompt
             if not user_prompt or not user_prompt.strip():
@@ -173,8 +196,9 @@ Please generate a Python screening function based on the above request. The func
             
             response = self.model.generate_content(full_prompt)
             
-            # Log the raw response (reduced verbosity)
-            gemini_logger.debug(f"GENERATE_SCREENING - RAW RESPONSE: {len(response.text)} chars")
+            # Log the raw response details
+            gemini_logger.info(f"Raw Response Length: {len(response.text) if response.text else 0} characters")
+            gemini_logger.info(f"Raw Response Content: {response.text}")
             
             if response.text:
                 # Extract Python code from response
@@ -182,28 +206,37 @@ Please generate a Python screening function based on the above request. The func
                 if code:
                     # Validate the generated code
                     if self._validate_screening_function(code):
-                        gemini_logger.debug(f"GENERATE_SCREENING - SUCCESS: {len(code)} chars")
+                        gemini_logger.info(f"Response Status: SUCCESS")
+                        gemini_logger.info(f"Generated Code Length: {len(code)} characters")
+                        gemini_logger.info(f"Generated Code: {code}")
+                        gemini_logger.info(f"=== GENERATE_SCREENING INTERACTION END ===")
                         return code
                     else:
-                        gemini_logger.warning(f"GENERATE_SCREENING - VALIDATION FAILED:")
-                        gemini_logger.warning(f"Code that failed: {code}")
+                        gemini_logger.error(f"Response Status: VALIDATION_FAILED")
+                        gemini_logger.error(f"Generated Code: {code}")
+                        gemini_logger.error(f"=== GENERATE_SCREENING INTERACTION END ===")
                         logger.error("Generated code failed validation")
                         return None
                 else:
-                    gemini_logger.warning(f"GENERATE_SCREENING - NO CODE EXTRACTED:")
-                    gemini_logger.warning(f"Response text: {response.text}")
+                    gemini_logger.error(f"Response Status: NO_CODE_EXTRACTED")
+                    gemini_logger.error(f"Response text: {response.text}")
+                    gemini_logger.error(f"=== GENERATE_SCREENING INTERACTION END ===")
                     logger.error("No valid Python code found in Gemini response")
                     return None
             else:
-                gemini_logger.error(f"GENERATE_SCREENING - EMPTY RESPONSE:")
+                gemini_logger.error(f"Response Status: EMPTY")
                 gemini_logger.error(f"Response object: {response}")
+                gemini_logger.error(f"=== GENERATE_SCREENING INTERACTION END ===")
                 logger.error("Empty response from Gemini")
                 return None
                 
         except Exception as e:
-            gemini_logger.error(f"GENERATE_SCREENING - ERROR:")
+            gemini_logger.error(f"=== GENERATE_SCREENING ERROR ===")
+            gemini_logger.error(f"Timestamp: {datetime.now().isoformat()}")
             gemini_logger.error(f"Error: {str(e)}")
-            gemini_logger.error(f"Error type: {type(e)}")
+            gemini_logger.error(f"Error Type: {type(e).__name__}")
+            gemini_logger.error(f"User Prompt: {user_prompt}")
+            gemini_logger.error(f"=== GENERATE_SCREENING ERROR END ===")
             logger.error(f"Error generating screening function: {e}")
             return None
     
@@ -774,8 +807,16 @@ CRITICAL SAFETY PATTERNS:
             logger.error("Gemini model not available")
             return
         
+        # Log chat session initialization
+        gemini_logger.info(f"=== CHAT SESSION START ===")
+        gemini_logger.info(f"Timestamp: {datetime.now().isoformat()}")
+        gemini_logger.info(f"Markets Count: {len(markets) if markets else 0}")
+        gemini_logger.info(f"Events Count: {len(events) if events else 0}")
+        
         # Build context-aware system prompt
         system_prompt = self._build_chat_system_prompt(markets, events)
+        gemini_logger.info(f"System Prompt Length: {len(system_prompt)} characters")
+        gemini_logger.info(f"System Prompt: {system_prompt}")
         
         # Start chat session
         self.chat_session = self.model.start_chat(history=[])
@@ -783,7 +824,14 @@ CRITICAL SAFETY PATTERNS:
         # Send system context as first message
         try:
             self.chat_session.send_message(system_prompt)
+            gemini_logger.info(f"Chat Session Status: INITIALIZED")
+            gemini_logger.info(f"=== CHAT SESSION START END ===")
         except Exception as e:
+            gemini_logger.error(f"=== CHAT SESSION ERROR ===")
+            gemini_logger.error(f"Timestamp: {datetime.now().isoformat()}")
+            gemini_logger.error(f"Error: {str(e)}")
+            gemini_logger.error(f"Error Type: {type(e).__name__}")
+            gemini_logger.error(f"=== CHAT SESSION ERROR END ===")
             logger.error(f"Error starting chat session: {e}")
             self.chat_session = None
     
@@ -802,14 +850,41 @@ CRITICAL SAFETY PATTERNS:
             return None
         
         try:
+            # Log detailed chat interaction
+            gemini_logger.info(f"=== CHAT INTERACTION START ===")
+            gemini_logger.info(f"Timestamp: {datetime.now().isoformat()}")
+            gemini_logger.info(f"User Message: {user_message}")
+            gemini_logger.info(f"Message Length: {len(user_message)} characters")
+            
             response = self.chat_session.send_message(user_message)
-            return response.text if response.text else None
+            
+            if response and response.text:
+                gemini_logger.info(f"Response Status: SUCCESS")
+                gemini_logger.info(f"Response Length: {len(response.text)} characters")
+                gemini_logger.info(f"Response Content: {response.text}")
+                gemini_logger.info(f"=== CHAT INTERACTION END ===")
+                return response.text
+            else:
+                gemini_logger.error(f"Response Status: EMPTY")
+                gemini_logger.error(f"Response object: {response}")
+                gemini_logger.error(f"=== CHAT INTERACTION END ===")
+                return None
+                
         except Exception as e:
+            gemini_logger.error(f"=== CHAT ERROR ===")
+            gemini_logger.error(f"Timestamp: {datetime.now().isoformat()}")
+            gemini_logger.error(f"Error: {str(e)}")
+            gemini_logger.error(f"Error Type: {type(e).__name__}")
+            gemini_logger.error(f"User Message: {user_message}")
+            gemini_logger.error(f"=== CHAT ERROR END ===")
             logger.error(f"Error in chat: {e}")
             return f"Sorry, I encountered an error: {str(e)}"
     
     def reset_chat(self):
         """Reset the chat session."""
+        gemini_logger.info(f"=== CHAT SESSION RESET ===")
+        gemini_logger.info(f"Timestamp: {datetime.now().isoformat()}")
+        gemini_logger.info(f"=== CHAT SESSION RESET END ===")
         self.chat_session = None
     
     def _build_chat_system_prompt(self, markets: List[Market] = None, events: List[Event] = None) -> str:
@@ -840,9 +915,12 @@ CURRENT MARKET CONTEXT:
                     event_categories[event.category] = event_categories.get(event.category, 0) + 1
             
             if event_categories:
+                event_lines = []
+                for cat, count in event_categories.items():
+                    event_lines.append(f'- {cat}: {count} events')
                 event_context = f"""
 EVENT CATEGORIES:
-{chr(10).join(f'- {cat}: {count} events' for cat, count in event_categories.items())}
+{chr(10).join(event_lines)}
 """
         
         return f"""You are an expert AI assistant specializing in Kalshi prediction markets and trading. You help users understand markets, analyze trading opportunities, and answer questions about prediction market trading.

@@ -3,10 +3,9 @@ Simple Kalshi Market Dashboard
 """
 import streamlit as st
 import logging
-from datetime import datetime
 
 from config import Config, setup_logging
-from kalshi import KalshiAPIClient, WebSocketManager
+from kalshi import KalshiAPIClient
 from screening import MarketScreener, GeminiScreener
 
 from screener import ScreenerPage
@@ -25,37 +24,36 @@ class SimpleDashboard:
         self.kalshi_client = KalshiAPIClient(self.config)
         self.screener = MarketScreener(self.kalshi_client, self.config)
         self.gemini_screener = GeminiScreener(self.config)
-        self.ws_manager = WebSocketManager(self.config)
         
         # Initialize pages
         self.screener_page = ScreenerPage(
             self.kalshi_client, 
             self.screener, 
             self.gemini_screener,
-            self.ws_manager,
             self.config
         )
         self.portfolio_page = PortfolioPage(
-            self.kalshi_client,
-            self.ws_manager
+            self.kalshi_client
         )
         
         # Initialize session state
         self._init_session_state()
     
     def _init_session_state(self):
-        """Initialize session state variables."""
-        defaults = {
-            'current_page': 'Screener',
-            'websocket_connected': False,
-            'last_update': None,
-            'screening_results': [],
-            'portfolio_data': None
-        }
-        
-        for key, default_value in defaults.items():
-            if key not in st.session_state:
+        """Initialize session state variables efficiently."""
+        if not hasattr(st.session_state, '_initialized'):
+            defaults = {
+                'current_page': 'Screener',
+                'last_update': None,
+                'screening_results': [],
+                'portfolio_data': None
+            }
+            
+            for key, default_value in defaults.items():
                 st.session_state[key] = default_value
+            
+            st.session_state._initialized = True
+    
     
     def run(self):
         """Run the dashboard."""
@@ -63,28 +61,52 @@ class SimpleDashboard:
             page_title="Kalshi Dashboard",
             page_icon="📈",
             layout="wide",
-            initial_sidebar_state="collapsed"
+            initial_sidebar_state="expanded"
         )
         
-        # Header
-        st.title("📈 Kalshi Market Dashboard")
-        
-        # Page navigation
-        col1, col2, col3 = st.columns([1, 2, 1])
-        
-        with col1:
-            if st.button("🎯 Screener", key="nav_screener", width='stretch'):
+        # Sidebar navigation
+        with st.sidebar:
+            st.title("📈 Kalshi Dashboard")
+            st.divider()
+            
+            # Page selector
+            st.subheader("📋 Navigation")
+            page = st.radio(
+                "Select Page:",
+                ["🎯 Screener", "💼 Portfolio"],
+                index=0 if st.session_state.current_page == 'Screener' else 1,
+                key="page_selector"
+            )
+            
+            # Update session state based on selection
+            if page == "🎯 Screener":
                 st.session_state.current_page = 'Screener'
                 st.rerun()
-        
-        with col3:
-            if st.button("💼 Portfolio", key="nav_portfolio", width='stretch'):
+            elif page == "💼 Portfolio":
                 st.session_state.current_page = 'Portfolio'
                 st.rerun()
+            
+            st.divider()
+            
+            # Add some dashboard info
+            st.markdown("### 📊 Quick Stats")
+            if st.session_state.current_page == 'Portfolio' and st.session_state.portfolio_data:
+                try:
+                    # Show quick portfolio stats in sidebar
+                    portfolio_data = st.session_state.portfolio_data
+                    st.metric("Cash Balance", f"${portfolio_data['cash_balance']:.2f}")
+                    st.metric("Total Portfolio", f"${portfolio_data['total_portfolio_value']:.2f}")
+                    st.metric("Active Positions", portfolio_data['total_positions'])
+                except Exception:
+                    st.info("Portfolio data loading...")
+            else:
+                st.info("Select Portfolio page to see stats")
+        
+        # Main content area
+        st.title("📈 Kalshi Market Dashboard")
         
         # Current page indicator
-        with col2:
-            st.markdown(f"**Current Page:** {st.session_state.current_page}")
+        st.markdown(f"**Current Page:** {st.session_state.current_page}")
         
         st.divider()
         

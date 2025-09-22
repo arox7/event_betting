@@ -4,27 +4,26 @@ Portfolio Overview Page
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
-from pprint import pprint
 
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from kalshi import KalshiAPIClient, WebSocketManager
+from kalshi import KalshiAPIClient
 from kalshi.models import utc_now, MarketPosition
 
 # Note: portfolio.py doesn't need to configure logging as it's imported by dashboard modules
 # that will configure logging. We just get the logger here.
 logger = logging.getLogger(__name__)
 
+
 class PortfolioPage:
     """Portfolio overview page."""
     
-    def __init__(self, kalshi_client: KalshiAPIClient, ws_manager: WebSocketManager):
+    def __init__(self, kalshi_client: KalshiAPIClient):
         """Initialize the portfolio page."""
         self.kalshi_client = kalshi_client
-        self.ws_manager = ws_manager
         
         # Initialize session state for portfolio
         if 'portfolio_data' not in st.session_state:
@@ -38,9 +37,13 @@ class PortfolioPage:
         """Render the portfolio page."""
         st.header("💼 Portfolio Overview")
         
+        
         # Auto-load portfolio data if not already loaded
         if st.session_state.portfolio_data is None:
             self._load_portfolio_data()
+        
+        # Manual refresh button available in portfolio summary section
+        
         
         # Portfolio summary section
         self._render_portfolio_summary()
@@ -48,13 +51,17 @@ class PortfolioPage:
         # Show data freshness indicator
         if st.session_state.portfolio_data and st.session_state.portfolio_last_update:
             time_diff = utc_now() - st.session_state.portfolio_last_update
-            minutes_ago = int(time_diff.total_seconds() / 60)
-            if minutes_ago < 1:
-                st.caption("🟢 Data is current (just loaded)")
-            elif minutes_ago < 5:
+            seconds_ago = int(time_diff.total_seconds())
+            if seconds_ago < 10:
+                st.caption("🟢 Data is current (real-time updates active)")
+            elif seconds_ago < 60:
+                st.caption(f"🟡 Data is {seconds_ago} seconds old")
+            elif seconds_ago < 300:
+                minutes_ago = int(seconds_ago / 60)
                 st.caption(f"🟡 Data is {minutes_ago} minute(s) old")
             else:
-                st.caption(f"🔴 Data is {minutes_ago} minutes old - consider refreshing")
+                minutes_ago = int(seconds_ago / 60)
+                st.caption(f"🔴 Data is {minutes_ago} minutes old")
         
         # Create tabs for different portfolio sections
         if st.session_state.portfolio_data:
@@ -449,18 +456,125 @@ class PortfolioPage:
             st.warning(f"Could not load consolidated portfolio summary: {e}")
     
     
+    def _format_time_to_close(self, market) -> str:
+        """Format time to close as days, hours, minutes."""
+        try:
+            # Get close time from market
+            close_time = getattr(market, 'close_time', None)
+            if close_time is None:
+                return "N/A"
+            
+            # Ensure close_time is timezone-aware
+            if close_time.tzinfo is None:
+                close_time = close_time.replace(tzinfo=timezone.utc)
+            
+            # Calculate time difference
+            now = datetime.now(timezone.utc)
+            time_diff = close_time - now
+            
+            # If already closed or closing very soon
+            if time_diff.total_seconds() <= 0:
+                return "Closed"
+            
+            # Extract days, hours, minutes
+            total_seconds = int(time_diff.total_seconds())
+            days = total_seconds // 86400  # 86400 seconds in a day
+            hours = (total_seconds % 86400) // 3600  # 3600 seconds in an hour
+            minutes = (total_seconds % 3600) // 60  # 60 seconds in a minute
+            
+            # Format based on time remaining
+            if days > 0:
+                return f"{days}d {hours}h {minutes}m"
+            elif hours > 0:
+                return f"{hours}h {minutes}m"
+            else:
+                return f"{minutes}m"
+                
+        except Exception as e:
+            logger.error(f"Error formatting time to close for {market.ticker}: {e}")
+            return "N/A"
+    
+    
+    def _update_position_data(self):
+        """Update only position-related data without full refresh."""
+        try:
+            # Get updated positions
+            positions_data = self.kalshi_client.get_all_positions()
+            if positions_data and st.session_state.portfolio_data:
+                # Update only the position data in session state
+                st.session_state.portfolio_data['active_positions'] = positions_data.get('active_positions', [])
+                st.session_state.portfolio_data['market_positions'] = positions_data.get('market_positions', [])
+                
+                # Re-apply date filtering
+                self._apply_date_filtering()
+                
+                # Update last update time
+                st.session_state.portfolio_last_update = utc_now()
+                
+                logger.info("Position data updated successfully")
+                
+        except Exception as e:
+            logger.error(f"Error updating position data: {e}")
+    
+    
+    def _update_fill_data(self):
+        """Update only fill-related data without full refresh."""
+        try:
+            # For fills, we need to refresh the entire portfolio data since fills affect multiple metrics
+            self._load_portfolio_data()
+            logger.info("Fill data updated successfully")
+            
+        except Exception as e:
+            logger.error(f"Error updating fill data: {e}")
+    
+    def _update_market_prices(self):
+        """Update only market price data without full refresh."""
+        try:
+            logger.info("Updating market prices...")
+            
+            # For ticker updates, we need to refresh the unrealized P&L calculations
+            # The most reliable way is to recalculate all unrealized P&L data
+            if st.session_state.portfolio_data:
+                # Get fresh unrealized P&L data for all positions
+                all_unrealized_pnl = self.kalshi_client.get_all_unrealized_pnl()
+                if all_unrealized_pnl:
+                    # Store the updated unrealized P&L data in session state
+                    st.session_state.portfolio_data['unrealized_pnl_data'] = all_unrealized_pnl
+                    
+                    # Update last update time
+                    st.session_state.portfolio_last_update = utc_now()
+                    
+                    logger.info("Market price data updated successfully")
+                else:
+                    logger.warning("Could not get updated unrealized P&L data")
+            else:
+                logger.warning("No portfolio data available for price updates")
+                
+        except Exception as e:
+            logger.error(f"Error updating market price data: {e}")
+    
     def _render_positions_table(self, positions: List[Dict[str, Any]]):
         """Render positions in a table format with unrealized P&L."""
         if not positions:
             st.info("No positions to display")
             return
         
-        # Get unrealized P&L data for all positions
+        # Get unrealized P&L data for all positions (use cached data if available)
         unrealized_pnl_data = {}
         try:
-            all_unrealized_pnl = self.kalshi_client.get_all_unrealized_pnl()
-            if all_unrealized_pnl:
+            # First try to use cached data
+            if 'unrealized_pnl_data' in st.session_state.portfolio_data:
+                all_unrealized_pnl = st.session_state.portfolio_data['unrealized_pnl_data']
                 unrealized_pnl_data = all_unrealized_pnl.get('positions', {})
+                logger.info("Using cached unrealized P&L data")
+            else:
+                # Fallback to fresh API call
+                all_unrealized_pnl = self.kalshi_client.get_all_unrealized_pnl()
+                if all_unrealized_pnl:
+                    unrealized_pnl_data = all_unrealized_pnl.get('positions', {})
+                    # Cache the data for future use
+                    st.session_state.portfolio_data['unrealized_pnl_data'] = all_unrealized_pnl
+                logger.info("Using fresh unrealized P&L data from API")
         except Exception as e:
             st.warning(f"Could not load unrealized P&L data: {e}")
             
@@ -514,6 +628,9 @@ class PortfolioPage:
                 # Create Kalshi link for the market using event.series_ticker
                 kalshi_link = f"https://kalshi.com/markets/{event.series_ticker}"
             
+                # Calculate time to close in days, hours, minutes format
+                time_to_close_display = self._format_time_to_close(market)
+                
                 table_data.append({
                     'Ticker': market.ticker,
                     'Kalshi Link': kalshi_link,
@@ -526,6 +643,7 @@ class PortfolioPage:
                     'Unrealized P&L': f"${unrealized_pnl:.2f}",
                     'Fees': f"${fees_paid:.2f}",
                     'Net P&L': f"${net_pnl:.2f}",
+                    'Time to Close': time_to_close_display,
                 })
             except Exception as e:
                 st.warning(f"Error processing position {pos['ticker']}: {e}")
@@ -600,6 +718,10 @@ class PortfolioPage:
                     "Net P&L",
                     help="Total P&L including realized and unrealized gains/losses minus fees",
                     format="$%.2f"
+                ),
+                "Time to Close": st.column_config.TextColumn(
+                    "Time to Close",
+                    help="Time remaining until the market closes (days, hours, minutes)"
                 )
             }
         )

@@ -19,7 +19,6 @@ DEFAULT_SCREENING_CRITERIA: Dict[str, Any] = {
 # Session state defaults
 SESSION_DEFAULTS: Dict[str, Any] = {
     'current_page': 'Screener',
-    'websocket_connected': False,
     'last_update': None,
     'screening_results': [],
     'portfolio_data': None,

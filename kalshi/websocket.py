@@ -509,6 +509,19 @@ class WebSocketManager:
         asyncio.run_coroutine_threadsafe(self._async_subscribe_user_data(), self.loop)
         logger.info("Scheduled subscription to user data (fills, positions)")
     
+    def subscribe_to_user_data_with_callbacks(self, fill_callback=None, position_callback=None):
+        """Subscribe to user-specific data (fills, positions) with event callbacks."""
+        if not self.running or not self.loop:
+            logger.warning("WebSocket manager not running or no event loop")
+            return
+        
+        # Schedule async subscription with callbacks
+        asyncio.run_coroutine_threadsafe(
+            self._async_subscribe_user_data_with_callbacks(fill_callback, position_callback), 
+            self.loop
+        )
+        logger.info("Scheduled subscription to user data with event callbacks")
+    
     async def _async_subscribe_user_data(self):
         """Async method to subscribe to user data."""
         try:
@@ -521,6 +534,19 @@ class WebSocketManager:
             logger.info("Subscribed to user data (fills, positions)")
         except Exception as e:
             logger.error(f"Error subscribing to user data: {e}")
+    
+    async def _async_subscribe_user_data_with_callbacks(self, fill_callback, position_callback):
+        """Async method to subscribe to user data with callbacks."""
+        try:
+            # Subscribe to fills with callback
+            self.ws_client.subscribe_fills(fill_callback)
+            
+            # Subscribe to market positions with callback
+            self.ws_client.subscribe_market_positions(position_callback)
+            
+            logger.info("Subscribed to user data (fills, positions) with event callbacks")
+        except Exception as e:
+            logger.error(f"Error subscribing to user data with callbacks: {e}")
     
     def subscribe_to_position_tickers(self, market_tickers: List[str]):
         """Subscribe to ticker updates for markets with open positions."""
@@ -537,6 +563,21 @@ class WebSocketManager:
             )
             logger.info(f"Scheduled subscription to ticker updates for {len(market_tickers)} markets with positions")
     
+    def subscribe_to_position_tickers_with_callback(self, market_tickers: List[str], callback=None):
+        """Subscribe to ticker updates for markets with open positions with event callback."""
+        if not self.running or not self.loop:
+            logger.warning("WebSocket manager not running or no event loop")
+            return
+        
+        # Subscribe to all tickers in a single subscription with callback
+        if market_tickers:
+            # Schedule async subscription with callback
+            asyncio.run_coroutine_threadsafe(
+                self._async_subscribe_position_tickers_with_callback(market_tickers, callback), 
+                self.loop
+            )
+            logger.info(f"Scheduled subscription to ticker updates with callback for {len(market_tickers)} markets with positions")
+    
     async def _async_subscribe_position_tickers(self, market_tickers: List[str]):
         """Async method to subscribe to position tickers."""
         try:
@@ -544,6 +585,14 @@ class WebSocketManager:
             logger.info(f"Subscribed to ticker updates for {len(market_tickers)} markets with positions")
         except Exception as e:
             logger.error(f"Error subscribing to position tickers: {e}")
+    
+    async def _async_subscribe_position_tickers_with_callback(self, market_tickers: List[str], callback):
+        """Async method to subscribe to position tickers with callback."""
+        try:
+            self.ws_client.subscribe_market_ticker(market_tickers, callback)
+            logger.info(f"Subscribed to ticker updates with callback for {len(market_tickers)} markets with positions")
+        except Exception as e:
+            logger.error(f"Error subscribing to position tickers with callback: {e}")
     
     def get_recent_messages(self) -> List[Dict[str, Any]]:
         """Get recent WebSocket messages."""
