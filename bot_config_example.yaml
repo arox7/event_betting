@@ -1,0 +1,56 @@
+# Example configuration file for Kalshi Market Making Bot
+# Copy this file to bot_config.yaml and modify as needed
+
+# Trading mode: conservative, moderate, or aggressive
+trading_mode: moderate
+
+# Market side to make markets on: yes, no, or both
+market_side: yes
+
+# Enable/disable the bot
+enabled: true
+
+# Risk management limits
+risk_limits:
+  max_position_per_market: 10      # Maximum contracts per market
+  max_total_exposure: 100          # Maximum total contracts across all markets
+  max_order_size: 5                # Maximum contracts per order
+  max_daily_loss: 50.0             # Maximum daily loss in dollars
+  stop_loss_percentage: 0.05       # Stop loss at 5% of portfolio
+  emergency_stop_loss: 0.10        # Emergency stop at 10% of portfolio
+  max_markets: 10                  # Maximum number of markets to trade
+
+# Market selection criteria
+market_selection:
+  min_volume: 1000                 # Minimum daily volume
+  max_spread_cents: 5              # Maximum spread in cents
+  min_liquidity_dollars: 100.0     # Minimum liquidity in dollars
+  max_time_to_close_days: 30       # Maximum days until close
+  min_time_to_close_days: 1        # Minimum days until close
+  categories: []                   # Specific categories to trade (empty = all)
+  exclude_categories: []           # Categories to exclude
+
+# Pricing strategy
+pricing_strategy:
+  default_spread_cents: 2          # Default spread in cents
+  min_spread_cents: 1              # Minimum spread in cents
+  max_spread_cents: 10             # Maximum spread in cents
+  price_adjustment_factor: 0.5     # How much to adjust prices based on position
+  volatility_adjustment: true      # Adjust prices based on volatility
+  momentum_adjustment: true        # Adjust prices based on momentum
+  time_decay_adjustment: true      # Adjust prices based on time to close
+
+# Order management
+order_management:
+  order_refresh_interval: 30       # Seconds between order refreshes
+  max_orders_per_market: 2         # Maximum orders per market (bid + ask)
+  order_timeout_minutes: 60        # Order timeout in minutes
+  batch_order_size: 5              # Number of orders to place in batch
+  order_retry_attempts: 3          # Number of retry attempts for failed orders
+  order_retry_delay: 5             # Delay between retry attempts in seconds
+
+# Advanced settings
+use_websockets: true               # Use websockets for real-time data
+log_level: INFO                    # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+performance_tracking: true         # Enable performance tracking
+emergency_stop_enabled: true       # Enable emergency stop functionality

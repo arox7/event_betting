@@ -2,6 +2,7 @@
 Kalshi Portfolio Functions - Portfolio, positions, balance, fills, and settlements operations.
 """
 import logging
+import time
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 
@@ -9,6 +10,38 @@ from .http_client import KalshiHTTPClient
 from .shared_utils import create_sdk_client
 
 logger = logging.getLogger(__name__)
+
+def _make_request_with_retry(client: KalshiHTTPClient, method: str, path: str, params: Optional[Dict] = None, max_retries: int = 3) -> Optional[Any]:
+    """Make a request with exponential backoff retry logic for rate limiting."""
+    for attempt in range(max_retries + 1):
+        try:
+            response = client.make_authenticated_request(method, path, params)
+            
+            # If we get a 429 (rate limited), retry with exponential backoff
+            if response.status_code == 429:
+                if attempt < max_retries:
+                    delay = (2 ** attempt) + (0.1 * attempt)  # Exponential backoff: 1s, 2.1s, 4.2s
+                    logger.warning(f"Rate limited (429), retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries + 1})")
+                    time.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"Rate limited (429) after {max_retries + 1} attempts")
+                    return None
+            
+            # For other errors, return immediately
+            return response
+            
+        except Exception as e:
+            if attempt < max_retries:
+                delay = (2 ** attempt) + (0.1 * attempt)
+                logger.warning(f"Request failed: {e}, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries + 1})")
+                time.sleep(delay)
+                continue
+            else:
+                logger.error(f"Request failed after {max_retries + 1} attempts: {e}")
+                return None
+    
+    return None
 
 def get_balance_dollars(client: KalshiHTTPClient) -> Optional[float]:
     """Get account balance in dollars using raw HTTP requests."""
@@ -38,8 +71,88 @@ def get_balance_dollars(client: KalshiHTTPClient) -> Optional[float]:
         logger.error(f"Failed to get balance: {e}")
         return None
 
+def get_active_positions_only(client: KalshiHTTPClient) -> Optional[Dict[str, Any]]:
+    """Get active positions and resting orders using optimized API parameters.
+    
+    Returns positions that have:
+    - Non-zero position values (actual holdings)
+    - Resting orders (pending orders)
+    
+    This is optimized for market making bots that need to track both
+    current positions and pending orders to avoid conflicts.
+    """
+    # Check cache first
+    cached_positions = client.get_cached('active_positions')
+    if cached_positions is not None:
+        return cached_positions
+        
+    try:
+        all_market_positions = []
+        cursor = None
+        request_count = 0
+        max_requests = 10  # Even more conservative for active positions only
+        
+        while request_count < max_requests:
+            # Optimized parameters for active positions and resting orders
+            params = {
+                'limit': 1000,  # Maximum allowed by API
+                'settlement_status': 'unsettled',  # Only unsettled positions (active markets)
+                'count_filter': "position,resting_order_count"  # Positions with holdings OR resting orders
+            }
+            if cursor:
+                params['cursor'] = cursor
+            
+            # Make authenticated request with retry logic
+            path = "/portfolio/positions"
+            response = _make_request_with_retry(client, "GET", path, params)
+            
+            if response is None:
+                logger.error("Failed to get active positions after retries")
+                return None
+            
+            if response.status_code != 200:
+                logger.error(f"API call failed: {response.status_code} - {response.text}")
+                return None
+            
+            data = response.json()
+            market_positions = data.get('market_positions', [])
+            
+            # Add to our collections
+            all_market_positions.extend(market_positions)
+            
+            # Check if there are more pages
+            cursor = data.get('cursor')
+            if not cursor:
+                break
+                
+            request_count += 1
+            
+            # Add delay between requests to avoid rate limiting
+            if cursor:  # Only delay if there are more pages
+                time.sleep(1.0)  # Increased to 1 second delay between requests
+        
+        # Filter for positions with actual holdings OR resting orders
+        active_positions = [pos for pos in all_market_positions if 
+                           pos.get('position', 0) != 0 or pos.get('resting_orders_count', 0) > 0]
+        
+        result = {
+            'active_positions': active_positions,
+            'all_market_positions': all_market_positions,
+            'market_positions': all_market_positions,  # Alias for backward compatibility
+            'positions': active_positions,  # Alias for backward compatibility
+            'cursor': None
+        }
+        
+        # Cache the result
+        client.set_cache('active_positions', result)
+        return result
+        
+    except Exception as e:
+        logger.error(f"Failed to get active positions: {e}")
+        return None
+
 def get_all_positions(client: KalshiHTTPClient) -> Optional[Dict[str, Any]]:
-    """Get all portfolio positions using raw HTTP requests with pagination."""
+    """Get all portfolio positions using raw HTTP requests with pagination and rate limiting."""
     # Check cache first
     cached_positions = client.get_cached('positions')
     if cached_positions is not None:
@@ -49,20 +162,26 @@ def get_all_positions(client: KalshiHTTPClient) -> Optional[Dict[str, Any]]:
         all_market_positions = []
         all_event_positions = []
         cursor = None
+        request_count = 0
+        max_requests = 20  # Reduced limit to be more conservative with rate limiting
         
-        while True:
-            # Build request parameters
+        while request_count < max_requests:
+            # Build request parameters - optimized based on API documentation
             params = {
-                'limit': 200,
-                'settlement_status': 'all',
-                'count_filter': "position,total_traded,resting_order_count"
+                'limit': 1000,  # Maximum allowed by API to minimize requests
+                'settlement_status': 'all',  # Get both settled and unsettled positions
+                'count_filter': "position,total_traded"  # Only positions with activity
             }
             if cursor:
                 params['cursor'] = cursor
             
-            # Make authenticated request
+            # Make authenticated request with retry logic
             path = "/portfolio/positions"
-            response = client.make_authenticated_request("GET", path, params)
+            response = _make_request_with_retry(client, "GET", path, params)
+            
+            if response is None:
+                logger.error("Failed to get positions after retries")
+                return None
             
             if response.status_code != 200:
                 logger.error(f"API call failed: {response.status_code} - {response.text}")
@@ -80,6 +199,12 @@ def get_all_positions(client: KalshiHTTPClient) -> Optional[Dict[str, Any]]:
             cursor = data.get('cursor')
             if not cursor:
                 break
+                
+            request_count += 1
+            
+            # Add delay between requests to avoid rate limiting
+            if cursor:  # Only delay if there are more pages
+                time.sleep(1.0)  # Increased to 1 second delay between requests
         
         # Filter client-side for positions with actual position != 0
         # The API count_up/count_down parameters might include resting orders
@@ -104,22 +229,28 @@ def get_all_positions(client: KalshiHTTPClient) -> Optional[Dict[str, Any]]:
         return None
 
 def get_settled_positions(client: KalshiHTTPClient) -> Optional[Dict[str, Any]]:
-    """Get settled portfolio positions using raw HTTP requests with pagination."""
+    """Get settled portfolio positions using raw HTTP requests with pagination and rate limiting."""
     try:
         all_settlements = []
         cursor = None
+        request_count = 0
+        max_requests = 20  # Reduced limit to be more conservative with rate limiting
         
-        while True:
-            # Build request parameters
+        while request_count < max_requests:
+            # Build request parameters - optimized based on API documentation
             params = {
-                'limit': 200,
+                'limit': 1000,  # Maximum allowed by API to minimize requests
             }
             if cursor:
                 params['cursor'] = cursor
             
-            # Make authenticated request
+            # Make authenticated request with retry logic
             path = "/portfolio/settlements"
-            response = client.make_authenticated_request("GET", path, params)
+            response = _make_request_with_retry(client, "GET", path, params)
+            
+            if response is None:
+                logger.error("Failed to get settlements after retries")
+                return None
             
             if response.status_code != 200:
                 logger.error(f"API call failed: {response.status_code} - {response.text}")
@@ -135,6 +266,12 @@ def get_settled_positions(client: KalshiHTTPClient) -> Optional[Dict[str, Any]]:
             cursor = data.get('cursor')
             if not cursor:
                 break
+                
+            request_count += 1
+            
+            # Add delay between requests to avoid rate limiting
+            if cursor:  # Only delay if there are more pages
+                time.sleep(1.0)  # Increased to 1 second delay between requests
         
         result = {
             'all_settlements': all_settlements,  # All settlements from API

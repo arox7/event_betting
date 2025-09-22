@@ -31,10 +31,17 @@ class Config:
     """Configuration class for the application."""
     
     # Kalshi API Configuration
-    KALSHI_API_KEY_ID = os.getenv('KALSHI_API_KEY_ID', '')
-    KALSHI_PRIVATE_KEY_PATH = os.getenv('KALSHI_PRIVATE_KEY_PATH', '')
-    KALSHI_API_HOST = os.getenv('KALSHI_API_HOST', 'https://api.elections.kalshi.com/trade-api/v2')
     KALSHI_DEMO_MODE = os.getenv('KALSHI_DEMO_MODE', 'false').lower() == 'true'
+    
+    # Use demo credentials if in demo mode, otherwise use production credentials
+    if KALSHI_DEMO_MODE:
+        KALSHI_API_KEY_ID = os.getenv('KALSHI_DEMO_API_KEY', os.getenv('KALSHI_API_KEY_ID', ''))
+        KALSHI_PRIVATE_KEY_PATH = os.getenv('KALSHI_DEMO_PRIVAY_KEY_PATH', os.getenv('KALSHI_PRIVATE_KEY_PATH', ''))
+        KALSHI_API_HOST = os.getenv('KALSHI_API_HOST', 'https://demo-api.kalshi.co/trade-api/v2')
+    else:
+        KALSHI_API_KEY_ID = os.getenv('KALSHI_API_KEY_ID', '')
+        KALSHI_PRIVATE_KEY_PATH = os.getenv('KALSHI_PRIVATE_KEY_PATH', '')
+        KALSHI_API_HOST = os.getenv('KALSHI_API_HOST', 'https://api.elections.kalshi.com/trade-api/v2')
     
     # Gemini API Configuration
     GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')

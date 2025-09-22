@@ -12,7 +12,7 @@ from .market_functions import (
     get_market_orderbook, get_events, get_events_by_tickers
 )
 from .portfolio_functions import (
-    get_balance_dollars, get_all_positions, get_settled_positions,
+    get_balance_dollars, get_all_positions, get_active_positions_only, get_settled_positions,
     get_fills, get_settlements, filter_market_positions_by_date, get_recent_pnl,
     calculate_unrealized_pnl, get_all_unrealized_pnl
 )
@@ -68,6 +68,10 @@ class KalshiAPIClient:
     def get_all_positions(self) -> Optional[Dict[str, Any]]:
         """Get all portfolio positions."""
         return get_all_positions(self.http_client)
+    
+    def get_active_positions_only(self) -> Optional[Dict[str, Any]]:
+        """Get only active positions (non-zero positions) - optimized for bot usage."""
+        return get_active_positions_only(self.http_client)
     
     def get_settled_positions(self) -> Optional[Dict[str, Any]]:
         """Get settled portfolio positions."""

@@ -2,7 +2,7 @@
 Kalshi Market Functions - Market, event, and orderbook operations.
 """
 import logging
-import concurrent.futures
+import time
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 
@@ -79,7 +79,7 @@ def get_market_by_ticker(client: KalshiHTTPClient, ticker: str) -> Optional[Mark
         return None
 
 def get_markets_by_tickers(client: KalshiHTTPClient, tickers: List[str]) -> Dict[str, Market]:
-    """Fetch multiple markets by tickers in batch using concurrent requests."""
+    """Fetch multiple markets by tickers using the batch API with tickers parameter."""
     if not tickers:
         return {}
     
@@ -98,47 +98,61 @@ def get_markets_by_tickers(client: KalshiHTTPClient, tickers: List[str]) -> Dict
     if not uncached_tickers:
         return cached_markets
     
-    # Fetch uncached markets using concurrent requests
+    # Fetch uncached markets using batch API with tickers parameter
     fetched_markets = {}
     try:
-        def fetch_single_market(ticker):
-            try:
-                url = f"{get_base_api_url(client)}/markets/{ticker}"
-                response = requests.get(url, timeout=10)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'market' in data and data['market']:
-                        market_dict = data['market']
+        # Use the batch API with tickers parameter - much more efficient!
+        # The API supports up to 1000 markets per request, so we can batch them
+        tickers_param = ",".join(uncached_tickers)
+        
+        # Make batch request using the tickers parameter
+        params = {
+            'tickers': tickers_param,
+            'limit': 1000  # Maximum allowed by API
+        }
+        
+        response = client.make_public_request("/markets", params)
+        
+        if response.status_code == 200:
+            data = response.json()
+            markets_data = data.get('markets', [])
+            
+            # Process each market in the response
+            for market_dict in markets_data:
+                try:
+                    ticker = market_dict.get('ticker')
+                    if ticker and ticker in uncached_tickers:
+                        # Handle status mapping
                         if market_dict.get("status") == "finalized":
                             market_dict["status"] = "settled"
+                        
                         market = Market.model_validate(market_dict, strict=False)
+                        fetched_markets[ticker] = market
+                        
                         # Cache the result
                         client.set_cache('market', market, ticker)
-                        return ticker, market
-                else:
-                    logger.warning(f"Failed to fetch market {ticker}: {response.status_code}")
-                    return ticker, None
-            except Exception as e:
-                logger.warning(f"Error fetching market {ticker}: {e}")
-                return ticker, None
-        
-        # Use ThreadPoolExecutor for concurrent requests (much faster than sequential)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_ticker = {executor.submit(fetch_single_market, ticker): ticker for ticker in uncached_tickers}
-            
-            for future in concurrent.futures.as_completed(future_to_ticker):
-                ticker, market = future.result()
+                        
+                except Exception as e:
+                    logger.warning(f"Error processing market data for {ticker}: {e}")
+                    continue
+                    
+        else:
+            logger.error(f"Batch market fetch failed: {response.status_code} - {response.text}")
+            # Fallback to individual requests if batch fails
+            for ticker in uncached_tickers:
+                market = get_market_by_ticker(client, ticker)
                 if market:
                     fetched_markets[ticker] = market
+                    time.sleep(0.2)  # Delay between fallback requests
                     
     except Exception as e:
         logger.error(f"Error in batch market fetching: {e}")
-        # Fallback to sequential fetching
+        # Fallback to individual requests
         for ticker in uncached_tickers:
             market = get_market_by_ticker(client, ticker)
             if market:
                 fetched_markets[ticker] = market
+                time.sleep(0.2)  # Delay between fallback requests
     
     # Combine cached and fetched markets
     all_markets = {**cached_markets, **fetched_markets}
@@ -197,17 +211,20 @@ def get_events_by_tickers(client: KalshiHTTPClient, event_tickers: List[str]) ->
             logger.warning(f"Error fetching event {event_ticker}: {e}")
             return None
     
-    # Use ThreadPoolExecutor for concurrent requests
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_ticker = {executor.submit(fetch_single_event, ticker): ticker for ticker in uncached_tickers}
-        
-        for future in concurrent.futures.as_completed(future_to_ticker):
-            event_ticker = future_to_ticker[future]
-            event = future.result()
+    # Use sequential requests to avoid rate limiting issues
+    # Process events one by one with delays between requests
+    for event_ticker in uncached_tickers:
+        try:
+            event = fetch_single_event(event_ticker)
             if event:
                 fetched_events[event_ticker] = event
                 # Cache the result
                 client.set_cache('event', event, event_ticker)
+                # Add delay between requests to avoid rate limiting
+                time.sleep(0.1)  # Reduced delay since events are less frequent
+        except Exception as e:
+            logger.warning(f"Error fetching event {event_ticker}: {e}")
+            continue
     
     # Combine cached and fetched events
     all_events = {**cached_events, **fetched_events}
