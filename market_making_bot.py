@@ -193,8 +193,12 @@ class KalshiMarketMakingBot:
     def _is_market_suitable(self, market: Market) -> bool:
         """Check if a market is suitable for market making."""
         try:
-            # Check volume
+            # Check volume (total volume)
             if market.volume and market.volume < self.bot_config.market_selection.min_volume:
+                return False
+            
+            # Check 24h volume if available (more recent activity)
+            if market.volume_24h and market.volume_24h < self.bot_config.market_selection.min_volume // 2:
                 return False
             
             # Check spread
@@ -205,15 +209,33 @@ class KalshiMarketMakingBot:
             if market.days_to_close and market.days_to_close > self.bot_config.market_selection.max_time_to_close_days:
                 return False
             
-            # Check liquidity (simplified - using volume as proxy)
-            # Convert min_liquidity_dollars to cents for comparison with market.volume (which is in cents)
-            min_liquidity_cents = int(self.bot_config.market_selection.min_liquidity_dollars * 100)
-            if market.volume and market.volume < min_liquidity_cents:
+            # Check open interest (indicates market depth and interest)
+            if market.open_interest and market.open_interest < self.bot_config.market_selection.min_volume:
                 return False
+            
+            # Check liquidity using multiple metrics
+            # 1. Direct liquidity field if available
+            if hasattr(market, 'liquidity_dollars') and market.liquidity_dollars:
+                if market.liquidity_dollars < self.bot_config.market_selection.min_liquidity_dollars:
+                    return False
+            # 2. Fallback to volume as liquidity proxy
+            else:
+                min_liquidity_cents = int(self.bot_config.market_selection.min_liquidity_dollars * 100)
+                if market.volume and market.volume < min_liquidity_cents:
+                    return False
             
             # Check if market has valid prices
             if market.yes_bid is None or market.yes_ask is None:
                 return False
+            
+            # Check if market is active (not closed/settled)
+            if market.status and market.status not in ['active', 'initialized']:
+                return False
+            
+            # Check if market can close early (avoid markets that might close unexpectedly)
+            if hasattr(market, 'can_close_early') and market.can_close_early:
+                # For now, we'll allow early close markets but could add logic to avoid them
+                pass
             
             return True
             

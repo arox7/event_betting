@@ -33,15 +33,21 @@ class Market(KalshiMarket):
     @computed_field
     @property
     def spread_percentage(self) -> Optional[float]:
-        """Calculate the spread percentage for Yes market."""
-        if self.yes_bid is None or self.yes_ask is None or self.yes_bid == 0:
+        """Calculate the spread percentage for Yes market using mid price."""
+        if self.yes_bid is None or self.yes_ask is None:
             return None
         
-        # Convert cents to dollars for calculation
-        yes_bid_dollars = self.yes_bid / 100.0
-        yes_ask_dollars = self.yes_ask / 100.0
+        # Calculate mid price in cents
+        mid_price_cents = (self.yes_bid + self.yes_ask) / 2
         
-        spread_pct = (yes_ask_dollars - yes_bid_dollars) / yes_bid_dollars
+        # Avoid division by zero
+        if mid_price_cents == 0:
+            return None
+        
+        # Calculate spread percentage: (ask - bid) / mid_price
+        spread_cents = self.yes_ask - self.yes_bid
+        spread_pct = spread_cents / mid_price_cents
+        
         return spread_pct
 
     @computed_field

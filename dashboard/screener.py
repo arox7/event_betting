@@ -224,7 +224,8 @@ class ScreenerPage:
                 criteria.min_volume_24h = st.session_state.screening_criteria['min_volume_24h']
                 criteria.min_liquidity_dollars = st.session_state.screening_criteria['min_liquidity_dollars']
                 criteria.min_open_interest = st.session_state.screening_criteria['min_open_interest']
-                criteria.max_spread_percentage = st.session_state.screening_criteria['max_spread_percentage']
+                # Convert percentage to decimal (UI shows 0-100%, model expects 0-1)
+                criteria.max_spread_percentage = st.session_state.screening_criteria['max_spread_percentage'] / 100.0
                 criteria.max_spread_cents = st.session_state.screening_criteria['max_spread_cents']
                 criteria.max_time_to_close_days = st.session_state.screening_criteria['max_time_to_close_days']
                 

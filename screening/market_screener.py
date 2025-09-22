@@ -129,21 +129,30 @@ class MarketScreener:
         # Check percentage spread (if criteria is set)
         if self.screening_criteria.max_spread_percentage is not None:
             try:
-                if hasattr(market, 'spread_percentage'):
-                    spread_pct = market.spread_percentage
-                    if spread_pct is not None:
-                        if spread_pct <= self.screening_criteria.max_spread_percentage:
-                            reasons.append(f"Spread percentage within range: {spread_pct:.1%} <= {self.screening_criteria.max_spread_percentage:.1%}")
-                        else:
-                            reasons.append(f"Spread percentage too high: {spread_pct:.1%} > {self.screening_criteria.max_spread_percentage:.1%}")
-                            passes_filters = False
+                spread_pct = market.spread_percentage
+                if spread_pct is not None:
+                    if spread_pct <= self.screening_criteria.max_spread_percentage:
+                        reasons.append(f"Spread percentage within range: {spread_pct:.1%} <= {self.screening_criteria.max_spread_percentage:.1%}")
                     else:
-                        reasons.append("Spread percentage calculated as None")
+                        reasons.append(f"Spread percentage too high: {spread_pct:.1%} > {self.screening_criteria.max_spread_percentage:.1%}")
                         passes_filters = False
                 else:
-                    logger.warning(f"Market {market.ticker} missing spread_percentage property. Available attributes: {[attr for attr in dir(market) if not attr.startswith('_')]}")
-                    reasons.append("Market object missing spread_percentage property")
-                    passes_filters = False
+                    # Try to calculate spread percentage manually if the property returns None
+                    if market.yes_bid is not None and market.yes_ask is not None:
+                        # Calculate mid price and spread percentage using mid price
+                        mid_price_cents = (market.yes_bid + market.yes_ask) / 2
+                        if mid_price_cents > 0:
+                            manual_spread_pct = (market.yes_ask - market.yes_bid) / mid_price_cents
+                            if manual_spread_pct <= self.screening_criteria.max_spread_percentage:
+                                reasons.append(f"Manual spread percentage within range: {manual_spread_pct:.1%} <= {self.screening_criteria.max_spread_percentage:.1%}")
+                            else:
+                                reasons.append(f"Manual spread percentage too high: {manual_spread_pct:.1%} > {self.screening_criteria.max_spread_percentage:.1%}")
+                                passes_filters = False
+                        else:
+                            reasons.append("Cannot calculate spread percentage - mid price is zero")
+                    else:
+                        reasons.append("Cannot calculate spread percentage - missing bid/ask data")
+                        passes_filters = False
             except Exception as e:
                 logger.error(f"Error calculating spread percentage for market {market.ticker}: {e}")
                 reasons.append(f"Error calculating spread percentage: {e}")
@@ -153,24 +162,31 @@ class MarketScreener:
         if (self.screening_criteria.min_spread_cents is not None or 
             self.screening_criteria.max_spread_cents is not None):
             try:
-                if hasattr(market, 'spread_cents'):
-                    spread_cents = market.spread_cents
-                    if spread_cents is not None:
+                spread_cents = market.spread_cents
+                if spread_cents is not None:
+                    min_cents = self.screening_criteria.min_spread_cents or 0
+                    max_cents = self.screening_criteria.max_spread_cents or float('inf')
+                    
+                    if min_cents <= spread_cents <= max_cents:
+                        reasons.append(f"Spread cents within range: {spread_cents} cents (min: {min_cents}, max: {max_cents})")
+                    else:
+                        reasons.append(f"Spread cents outside range: {spread_cents} cents (min: {min_cents}, max: {max_cents})")
+                        passes_filters = False
+                else:
+                    # Try to calculate spread cents manually if the property returns None
+                    if market.yes_bid is not None and market.yes_ask is not None:
+                        manual_spread_cents = market.yes_ask - market.yes_bid
                         min_cents = self.screening_criteria.min_spread_cents or 0
                         max_cents = self.screening_criteria.max_spread_cents or float('inf')
                         
-                        if min_cents <= spread_cents <= max_cents:
-                            reasons.append(f"Spread cents within range: {spread_cents} cents (min: {min_cents}, max: {max_cents})")
+                        if min_cents <= manual_spread_cents <= max_cents:
+                            reasons.append(f"Manual spread cents within range: {manual_spread_cents} cents (min: {min_cents}, max: {max_cents})")
                         else:
-                            reasons.append(f"Spread cents outside range: {spread_cents} cents (min: {min_cents}, max: {max_cents})")
+                            reasons.append(f"Manual spread cents outside range: {manual_spread_cents} cents (min: {min_cents}, max: {max_cents})")
                             passes_filters = False
                     else:
-                        reasons.append("Spread cents calculated as None")
+                        reasons.append("Cannot calculate spread cents - missing bid/ask data")
                         passes_filters = False
-                else:
-                    logger.warning(f"Market {market.ticker} missing spread_cents property")
-                    reasons.append("Market object missing spread_cents property")
-                    passes_filters = False
             except Exception as e:
                 logger.error(f"Error calculating spread cents for market {market.ticker}: {e}")
                 reasons.append(f"Error calculating spread cents: {e}")
@@ -192,35 +208,47 @@ class MarketScreener:
     def _check_basic_requirements(self, market: Market, reasons: List[str]) -> bool:
         """Check if market meets basic requirements."""
         # Market must be active (open)
-        if market.status not in ["active"]:
+        if market.status not in ["active", "open"]:
             reasons.append(f"Market is not active (status: {market.status})")
             return False
         
         # Must have minimum volume (check both total volume and 24h volume)
         if self.screening_criteria.min_volume is not None:
-            if market.volume < self.screening_criteria.min_volume:
-                reasons.append(f"Total volume too low: {market.volume} < {self.screening_criteria.min_volume}")
+            if market.volume is None or market.volume < self.screening_criteria.min_volume:
+                reasons.append(f"Total volume too low: {market.volume or 0} < {self.screening_criteria.min_volume}")
                 return False
         
         if self.screening_criteria.min_volume_24h is not None:
-            if market.volume_24h < self.screening_criteria.min_volume_24h:
-                reasons.append(f"24h volume too low: {market.volume_24h} < {self.screening_criteria.min_volume_24h}")
+            if market.volume_24h is None or market.volume_24h < self.screening_criteria.min_volume_24h:
+                reasons.append(f"24h volume too low: {market.volume_24h or 0} < {self.screening_criteria.min_volume_24h}")
                 return False
         
         # Must have minimum open interest
         if self.screening_criteria.min_open_interest is not None:
-            if market.open_interest < self.screening_criteria.min_open_interest:
-                reasons.append(f"Open interest too low: {market.open_interest} < {self.screening_criteria.min_open_interest}")
+            if market.open_interest is None or market.open_interest < self.screening_criteria.min_open_interest:
+                reasons.append(f"Open interest too low: {market.open_interest or 0} < {self.screening_criteria.min_open_interest}")
                 return False
         
-        # Must have minimum liquidity (volume + open interest)
+        # Must have minimum liquidity (check liquidity_dollars field or use volume as proxy)
         if self.screening_criteria.min_liquidity_dollars is not None:
-            if market.liquidity_dollars < self.screening_criteria.min_liquidity_dollars:
-                reasons.append(f"Liquidity too low: {market.liquidity_dollars} < {self.screening_criteria.min_liquidity_dollars}")
+            if market.liquidity_dollars is not None:
+                # Use direct liquidity field if available
+                if market.liquidity_dollars < self.screening_criteria.min_liquidity_dollars:
+                    reasons.append(f"Liquidity too low: ${market.liquidity_dollars:.2f} < ${self.screening_criteria.min_liquidity_dollars:.2f}")
+                    return False
+            elif market.volume is not None:
+                # Fallback to volume as liquidity proxy (convert volume to dollars)
+                volume_dollars = market.volume / 100.0  # Assuming volume is in cents
+                if volume_dollars < self.screening_criteria.min_liquidity_dollars:
+                    reasons.append(f"Volume-based liquidity too low: ${volume_dollars:.2f} < ${self.screening_criteria.min_liquidity_dollars:.2f}")
+                    return False
+            else:
+                reasons.append("No liquidity data available")
                 return False
         
         # Must be within time limit
         if (self.screening_criteria.max_time_to_close_days is not None and 
+            market.days_to_close is not None and 
             market.days_to_close > self.screening_criteria.max_time_to_close_days):
             reasons.append(f"Too far from close: {market.days_to_close} days")
             return False

@@ -51,9 +51,13 @@ def get_balance_dollars(client: KalshiHTTPClient) -> Optional[float]:
         return cached_balance
         
     try:
-        # Make authenticated request
+        # Make authenticated request with retry logic
         path = "/portfolio/balance"
-        response = client.make_authenticated_request("GET", path)
+        response = _make_request_with_retry(client, "GET", path)
+        
+        if response is None:
+            logger.error("Failed to get balance after retries")
+            return None
         
         if response.status_code != 200:
             logger.error(f"API call failed: {response.status_code} - {response.text}")

@@ -66,8 +66,10 @@ class RiskLimits:
 class MarketSelection:
     """Market selection criteria."""
     min_volume: int = 1000
+    min_volume_24h: int = 500  # Minimum 24h volume for recent activity
     max_spread_cents: int = 5
     min_liquidity_dollars: float = 100.0
+    min_open_interest: int = 1000  # Minimum open interest for market depth
     max_time_to_close_days: int = 30
     min_time_to_close_days: int = 1
     categories: List[str] = field(default_factory=list)
@@ -77,10 +79,14 @@ class MarketSelection:
         """Validate market selection criteria."""
         if self.min_volume < 0:
             raise ValueError("min_volume must be non-negative")
+        if self.min_volume_24h < 0:
+            raise ValueError("min_volume_24h must be non-negative")
         if self.max_spread_cents < 0:
             raise ValueError("max_spread_cents must be non-negative")
         if self.min_liquidity_dollars < 0:
             raise ValueError("min_liquidity_dollars must be non-negative")
+        if self.min_open_interest < 0:
+            raise ValueError("min_open_interest must be non-negative")
         if self.max_time_to_close_days < 0:
             raise ValueError("max_time_to_close_days must be non-negative")
         if self.min_time_to_close_days < 0:
@@ -257,8 +263,10 @@ class BotConfigManager:
         # Market selection
         market_selection = MarketSelection(
             min_volume=int(os.getenv('BOT_MIN_VOLUME', '1000')),
+            min_volume_24h=int(os.getenv('BOT_MIN_VOLUME_24H', '500')),
             max_spread_cents=int(os.getenv('BOT_MAX_SPREAD_CENTS', '5')),
             min_liquidity_dollars=float(os.getenv('BOT_MIN_LIQUIDITY_DOLLARS', '100.0')),
+            min_open_interest=int(os.getenv('BOT_MIN_OPEN_INTEREST', '1000')),
             max_time_to_close_days=int(os.getenv('BOT_MAX_TIME_TO_CLOSE_DAYS', '30')),
             min_time_to_close_days=int(os.getenv('BOT_MIN_TIME_TO_CLOSE_DAYS', '1')),
             categories=os.getenv('BOT_CATEGORIES', '').split(',') if os.getenv('BOT_CATEGORIES') else [],

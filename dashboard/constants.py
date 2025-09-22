@@ -7,7 +7,7 @@ from typing import Dict, Any, List
 DEFAULT_SCREENING_CRITERIA: Dict[str, Any] = {
     'min_volume': 1000,
     'min_volume_24h': 500,
-    'max_spread_percentage': 5.0,
+    'max_spread_percentage': 5.0,  # 5% as percentage (UI format)
     'max_spread_cents': 10,
     'min_spread_cents': 1,
     'min_liquidity_dollars': 1000,

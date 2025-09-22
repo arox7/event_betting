@@ -510,31 +510,60 @@ Please generate a Python screening function based on the above request. The func
 MARKET SCHEMA (from Kalshi API):
 ```python
 class Market:
+    # Core identification fields
     ticker: Optional[str]                    # Market identifier (e.g., "PRES24DEM")
     series_ticker: Optional[str]             # Series identifier
     event_ticker: Optional[str]              # Event identifier
     title: Optional[str]                     # Market title/question
     subtitle: Optional[str]                  # Additional description
+    
+    # Timing fields
     open_time: Optional[datetime]            # When market opened
     close_time: Optional[datetime]           # When market closes
     expiration_time: Optional[datetime]      # When market expires/settles (use close_time instead)
+    
+    # Market status and metadata
     status: Optional[str]                    # 'initialized', 'active', 'closed', 'settled', 'determined'
+    result: Optional[str]                    # Settlement result: 'yes', 'no', or ''
+    can_close_early: Optional[bool]          # Can market close early
+    category: Optional[str]                  # Market category
+    
+    # Pricing fields (all in cents)
     yes_bid: Optional[float]                 # Current Yes bid price (cents)
     yes_ask: Optional[float]                 # Current Yes ask price (cents)
     no_bid: Optional[float]                  # Current No bid price (cents)
     no_ask: Optional[float]                  # Current No ask price (cents)
     last_price: Optional[float]              # Last traded price (cents)
+    
+    # Volume and liquidity fields
     volume: Optional[int]                    # Total volume (in # of contracts)
     volume_24h: Optional[int]                # 24h volume (in # of contracts)
-    result: Optional[str]                    # Settlement result: 'yes', 'no', or ''
-    can_close_early: Optional[bool]          # Can market close early
+    open_interest: Optional[int]             # Open interest (total outstanding contracts)
+    liquidity_dollars: Optional[float]       # Liquidity in dollars
+    
+    # Additional fields
     cap_count: Optional[int]                 # Count data
+    yes_sub_title: Optional[str]             # Yes outcome subtitle
+    no_sub_title: Optional[str]              # No outcome subtitle
+    settlement_value_dollars: Optional[float] # Settlement value in dollars
     
     # Computed properties (from our extended model):
-    mid_price: float                         # (yes_bid + yes_ask) / 2 in dollars
+    mid_price: Optional[float]               # (yes_bid + yes_ask) / 2 in dollars
+    mid_price_cents: Optional[int]           # (yes_bid + yes_ask) / 2 in cents
+    mid_price_dollars: Optional[float]       # (yes_bid + yes_ask) / 2 in dollars
     spread_percentage: Optional[float]       # Spread as percentage
-    spread_cents: Optional[int]              # Spread in cents
-    days_to_close: int                       # Days until market closes
+    spread_cents: Optional[int]              # Spread in cents (yes_ask - yes_bid)
+    spread_dollars: Optional[float]          # Spread in dollars
+    yes_bid_dollars: Optional[float]         # Yes bid in dollars
+    yes_ask_dollars: Optional[float]         # Yes ask in dollars
+    no_bid_dollars: Optional[float]          # No bid in dollars
+    no_ask_dollars: Optional[float]          # No ask in dollars
+    last_price_dollars: Optional[float]      # Last price in dollars
+    days_to_close: Optional[int]             # Days until market closes
+    days_since_start: Optional[int]          # Days since market opened
+    close_date: Optional[datetime]           # Alias for close_time
+    settlement_date: Optional[datetime]      # Alias for close_time
+    description: Optional[str]               # Alias for subtitle
 ```
 
 class Event:
@@ -658,6 +687,71 @@ def screen_markets(market: Market, event: Event) -> tuple[bool, list[str]]:
             reasons.append(f"Volume too low: {market.volume or 0:,}")
         if not tight_spread:
             reasons.append(f"Spread too wide: {market.spread_cents or 0}¢")
+    
+    return passes, reasons
+```
+
+User: "find markets with high open interest and recent trading activity"
+Response:
+```python
+def screen_markets(market: Market, event: Event) -> tuple[bool, list[str]]:
+    \"\"\"Find markets with high open interest and recent trading activity.\"\"\"
+    passes = False
+    reasons = []
+    
+    # Check open interest (market depth)
+    high_open_interest = market.open_interest and market.open_interest >= 10000
+    
+    # Check 24h volume (recent activity)
+    recent_activity = market.volume_24h and market.volume_24h >= 1000
+    
+    if high_open_interest and recent_activity:
+        passes = True
+        reasons.append(f"High open interest: {market.open_interest:,}")
+        reasons.append(f"Recent activity: {market.volume_24h:,} contracts in 24h")
+    else:
+        if not high_open_interest:
+            reasons.append(f"Open interest too low: {market.open_interest or 0:,}")
+        if not recent_activity:
+            reasons.append(f"Low recent activity: {market.volume_24h or 0:,} contracts in 24h")
+    
+    return passes, reasons
+```
+
+User: "show me liquid markets with good bid-ask spreads for market making"
+Response:
+```python
+def screen_markets(market: Market, event: Event) -> tuple[bool, list[str]]:
+    \"\"\"Find liquid markets with good bid-ask spreads for market making.\"\"\"
+    passes = False
+    reasons = []
+    
+    # Check liquidity (direct field or use volume as proxy)
+    liquid = False
+    if market.liquidity_dollars and market.liquidity_dollars >= 500:
+        liquid = True
+        reasons.append(f"High liquidity: ${market.liquidity_dollars:,.2f}")
+    elif market.volume and market.volume >= 5000:
+        liquid = True
+        reasons.append(f"High volume (liquidity proxy): {market.volume:,} contracts")
+    
+    # Check spread (good for market making)
+    good_spread = market.spread_cents and market.spread_cents >= 2 and market.spread_cents <= 10
+    
+    # Check if market is active
+    active = market.status == 'active'
+    
+    if liquid and good_spread and active:
+        passes = True
+        reasons.append(f"Good spread: {market.spread_cents}¢")
+        reasons.append(f"Active market")
+    else:
+        if not liquid:
+            reasons.append("Insufficient liquidity")
+        if not good_spread:
+            reasons.append(f"Poor spread: {market.spread_cents or 0}¢")
+        if not active:
+            reasons.append(f"Market not active: {market.status}")
     
     return passes, reasons
 ```
