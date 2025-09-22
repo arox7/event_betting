@@ -8,8 +8,10 @@ A Python-based dashboard for analyzing Kalshi prediction markets with AI-powered
 - **AI-Powered Screening**: Natural language queries using Gemini AI for custom market filtering
 - **Configurable Criteria**: Customizable screening parameters (volume, spread, liquidity, etc.)
 - **Market Analysis**: Detailed scoring system based on multiple factors
-- **Real-time Data**: Fetch and analyze current market data on demand
+- **On-Demand Data**: Fetch and analyze current market data with manual refresh
+- **Portfolio Tracking**: Complete portfolio management with accurate P&L calculations
 - **API Integration**: Full integration with Kalshi's Python SDK
+- **Clean Architecture**: Streamlined codebase without real-time websocket dependencies
 
 ## Installation
 
@@ -61,16 +63,6 @@ GEMINI_API_KEY=your-gemini-api-key-here
 
 ### Running the Dashboard
 
-Start the web dashboard:
-```bash
-python main.py
-```
-
-Or with a custom port:
-```bash
-python main.py --port 8502
-```
-
 Use the startup script (recommended):
 ```bash
 ./run_dashboard.sh
@@ -78,21 +70,27 @@ Use the startup script (recommended):
 
 Or run directly with Streamlit:
 ```bash
-streamlit run dashboard.py
+streamlit run dashboard/dashboard.py
 ```
 
-The dashboard will be available at `http://localhost:8501` (or your specified port)
+The dashboard will be available at `http://localhost:8501`
 
 ## Dashboard Features
 
-- **Portfolio Overview**: Complete portfolio tracking with cash, positions, and P&L
-- **Market Data Analysis**: Fetch and analyze current market data on demand
+### **Portfolio Management**
+- **Complete Portfolio Tracking**: Cash balance, positions, and accurate P&L calculations
+- **Real-time Market Values**: Current market prices and position values
+- **Performance Analytics**: Realized and unrealized P&L with detailed breakdowns
+- **Position Management**: View all active and closed positions with trading history
+- **P&L Charts**: Visual representation of trading performance over time
+
+### **Market Analysis**
 - **AI-Powered Screening**: Use natural language to create custom market filters
-- **Trading Performance**: 24-hour realized P&L and trading activity tracking
 - **Interactive Tables**: Sortable and filterable market data
 - **Visual Analytics**: Charts and graphs for market distribution and trends
 - **Market Details**: Detailed view of individual markets with full information
 - **Custom Filtering**: Advanced filtering options for market characteristics
+- **On-Demand Data**: Manual refresh for current market data
 
 ## Analysis Criteria
 
@@ -154,19 +152,34 @@ All portfolio data comes directly from the [Kalshi Portfolio API](https://docs.k
 
 ```
 event_betting/
-├── main.py                 # Main application entry point (dashboard launcher)
-├── config.py              # Configuration settings
-├── models.py              # Data models and classes
-├── kalshi_client.py       # Kalshi API client wrapper
-├── market_screener.py     # Market screening logic
-├── gemini_screener.py     # AI-powered screening with Gemini
-├── dashboard.py           # Streamlit dashboard (main interface)
-├── requirements.txt       # Python dependencies
-├── test_event.py          # Event testing utilities
-├── test_market.py         # Market testing utilities
-├── test_setup.py          # Setup validation script
-├── run_dashboard.sh       # Quick start script
-└── README.md             # This file
+├── main.py                    # Main application entry point
+├── config.py                  # Configuration settings
+├── requirements.txt           # Python dependencies
+├── run_dashboard.sh          # Quick start script
+├── README.md                 # This file
+├── SETUP.md                  # Detailed setup instructions
+├── dashboard/                # Dashboard application
+│   ├── __init__.py
+│   ├── dashboard.py          # Main dashboard interface
+│   ├── main.py              # Alternative dashboard entry point
+│   ├── portfolio.py         # Portfolio management page
+│   ├── screener.py          # Market screening page
+│   └── constants.py         # Dashboard constants
+├── kalshi/                   # Kalshi API integration
+│   ├── __init__.py
+│   ├── client.py            # Kalshi API client
+│   ├── models.py            # Data models and classes
+│   ├── portfolio_functions.py # Portfolio calculations
+│   ├── market_functions.py  # Market data functions
+│   ├── websocket.py         # WebSocket functionality (optional)
+│   └── ...
+├── screening/                # Market screening logic
+│   ├── __init__.py
+│   ├── market_screener.py   # Rule-based screening
+│   └── gemini_screener.py   # AI-powered screening
+└── tests/                    # Test utilities
+    ├── test_setup.py
+    └── ...
 ```
 
 ## API Requirements
@@ -197,19 +210,26 @@ The application logs to console:
 
 ### Adding New Analysis Features
 
-1. Update `ScreeningCriteria` in `models.py`
-2. Add filtering logic in `market_screener.py`
-3. Update dashboard UI in `dashboard.py`
-4. Add AI prompts in `gemini_screener.py` for natural language support
+1. Update `ScreeningCriteria` in `kalshi/models.py`
+2. Add filtering logic in `screening/market_screener.py`
+3. Update dashboard UI in `dashboard/dashboard.py`
+4. Add AI prompts in `screening/gemini_screener.py` for natural language support
 
 ### Customizing the Dashboard
 
-The dashboard is built with Streamlit and can be customized by modifying `dashboard.py`:
+The dashboard is built with Streamlit and can be customized by modifying files in the `dashboard/` directory:
 
+- **Main Interface**: `dashboard/dashboard.py` - Primary dashboard layout
+- **Portfolio Page**: `dashboard/portfolio.py` - Portfolio management features
+- **Screener Page**: `dashboard/screener.py` - Market screening interface
+- **Constants**: `dashboard/constants.py` - UI configuration and defaults
+
+**Customization Options:**
 - Add new charts and visualizations
 - Modify the layout and styling
 - Add new filtering and analysis options
 - Integrate additional AI capabilities
+- Extend portfolio tracking features
 
 ## Troubleshooting
 
@@ -221,13 +241,14 @@ The dashboard is built with Streamlit and can be customized by modifying `dashbo
 4. **AI Features Not Working**: Verify your Gemini API key is set in the `.env` file
 5. **Portfolio Data Missing**: Check that your Kalshi API credentials are valid and authenticated
 6. **Permission Errors**: Make sure the startup script is executable: `chmod +x run_dashboard.sh`
+7. **Portfolio Values Incorrect**: Use the refresh button to update portfolio data manually
 
 ### Debug Mode
 
 Enable debug logging by setting the environment variable:
 
 ```bash
-export PYTHONPATH=. && python -c "import logging; logging.basicConfig(level=logging.DEBUG)" && python main.py
+export PYTHONPATH=. && python -c "import logging; logging.basicConfig(level=logging.DEBUG)" && streamlit run dashboard/dashboard.py
 ```
 
 ## License

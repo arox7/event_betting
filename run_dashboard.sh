@@ -1,25 +1,13 @@
 #!/bin/bash
 
-# Kalshi Market Analysis Dashboard Startup Script
+# Run the Kalshi Dashboard
+echo "🚀 Starting Kalshi Dashboard..."
+echo "📁 Dashboard files are in the dashboard/ directory"
+echo "🔧 Main file: dashboard/dashboard.py"
+echo ""
 
-echo "🚀 Starting Kalshi Market Analysis Dashboard..."
+# Set the Python path to include the current directory
+export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 
-# Check if .env file exists
-if [ ! -f ".env" ]; then
-    echo "⚠️  .env file not found. Please create one with your Kalshi API credentials."
-    echo "   You can copy .env.example and fill in your details."
-    exit 1
-fi
-
-# Test setup
-echo "🧪 Testing setup..."
-python test_setup.py
-
-if [ $? -eq 0 ]; then
-    echo "✅ Setup test passed!"
-    echo "📊 Starting dashboard..."
-    python main.py
-else
-    echo "❌ Setup test failed. Please check your configuration."
-    exit 1
-fi
+# Run the dashboard
+streamlit run dashboard/dashboard.py --server.port 8501 --server.address localhost

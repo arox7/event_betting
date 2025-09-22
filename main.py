@@ -5,17 +5,12 @@ import logging
 import sys
 import subprocess
 import os
+import argparse
 
-from config import Config
+from config import Config, setup_logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# Configure logging with centralized setup
+setup_logging(level=logging.INFO, include_filename=True)
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +44,6 @@ class DashboardApp:
 
 def main():
     """Main function."""
-    import argparse
     
     parser = argparse.ArgumentParser(description='Kalshi Market Analysis Dashboard')
     parser.add_argument('--port', type=int, default=8501,

@@ -1,0 +1,10 @@
+---
+description: Rules to guide coding standards
+globs:
+alwaysApply: true
+---
+
+- When writing code, do not use excessive fallbacks that hide errors. 
+- Do not use excessive try/except. Errors are OK -- we must understand the root cause. 
+- Do not use inline import statements -- move them to the top of files. 
+- Do not duplicate logic if it is available elsewhere in the codebase.

@@ -3,12 +3,14 @@ Data models for the Kalshi market making bot.
 """
 import logging
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from kalshi_python.models.market import Market as KalshiMarket
 from kalshi_python.models.event import Event as KalshiEvent
-from pydantic import computed_field, field_validator, ValidationError
+from pydantic import BaseModel, computed_field, field_validator, ValidationError
 
+# Note: models.py doesn't need to configure logging as it's imported by other modules
+# that will configure logging. We just get the logger here.
 logger = logging.getLogger(__name__)
 
 def utc_now() -> datetime:
@@ -20,7 +22,12 @@ class Market(KalshiMarket):
     
     # Additional fields not in the base KalshiMarket class
     open_interest: Optional[int] = None
-    liquidity_dollars: Optional[float] = None
+    liquidity_dollars: Optional[float] = None  # Liquidity in dollars
+    yes_sub_title: Optional[str] = None
+    no_sub_title: Optional[str] = None
+    category: Optional[str] = None
+    settlement_value_dollars: Optional[float] = None  # Settlement value in dollars
+    
     
     
     @computed_field
@@ -40,7 +47,7 @@ class Market(KalshiMarket):
     @computed_field
     @property
     def spread_cents(self) -> Optional[int]:
-        """Calculate the spread cents for Yes market."""
+        """Calculate the spread in cents for Yes market."""
         if self.yes_bid is None or self.yes_ask is None:
             return None
         
@@ -50,8 +57,61 @@ class Market(KalshiMarket):
 
     @computed_field
     @property
+    def spread_dollars(self) -> Optional[float]:
+        """Calculate the spread in dollars for Yes market."""
+        spread_cents = self.spread_cents
+        return spread_cents / 100.0 if spread_cents is not None else None
+
+    @computed_field
+    @property
+    def mid_price_cents(self) -> Optional[int]:
+        """Calculate the mid price in cents for Yes market."""
+        if self.yes_bid is None or self.yes_ask is None:
+            return None
+        
+        return (self.yes_bid + self.yes_ask) // 2
+
+    @computed_field
+    @property
+    def mid_price_dollars(self) -> Optional[float]:
+        """Calculate the mid price in dollars for Yes market."""
+        mid_cents = self.mid_price_cents
+        return mid_cents / 100.0 if mid_cents is not None else None
+
+    @computed_field
+    @property
+    def yes_bid_dollars(self) -> Optional[float]:
+        """Convert yes bid from cents to dollars."""
+        return self.yes_bid / 100.0 if self.yes_bid is not None else None
+
+    @computed_field
+    @property
+    def yes_ask_dollars(self) -> Optional[float]:
+        """Convert yes ask from cents to dollars."""
+        return self.yes_ask / 100.0 if self.yes_ask is not None else None
+
+    @computed_field
+    @property
+    def no_bid_dollars(self) -> Optional[float]:
+        """Convert no bid from cents to dollars."""
+        return self.no_bid / 100.0 if self.no_bid is not None else None
+
+    @computed_field
+    @property
+    def no_ask_dollars(self) -> Optional[float]:
+        """Convert no ask from cents to dollars."""
+        return self.no_ask / 100.0 if self.no_ask is not None else None
+
+    @computed_field
+    @property
+    def last_price_dollars(self) -> Optional[float]:
+        """Convert last price from cents to dollars."""
+        return self.last_price / 100.0 if self.last_price is not None else None
+
+    @computed_field
+    @property
     def mid_price(self) -> Optional[float]:
-        """Calculate the mid price for Yes market."""
+        """Calculate the mid price for Yes market in dollars."""
         if self.yes_bid is None or self.yes_ask is None:
             return None
         
@@ -102,9 +162,9 @@ class ScreeningCriteria:
     min_volume: Optional[int] = None
     min_volume_24h: Optional[int] = None
     max_spread_percentage: Optional[float] = None
-    max_spread_cents: Optional[int] = None
-    min_spread_cents: Optional[int] = None
-    min_liquidity: Optional[int] = None
+    max_spread_cents: Optional[int] = None  # Max spread in cents
+    min_spread_cents: Optional[int] = None  # Min spread in cents
+    min_liquidity_dollars: Optional[float] = None  # Min liquidity in dollars
     max_time_to_close_days: Optional[int] = None
     min_open_interest: Optional[int] = None
     categories: Optional[List[str]] = None
@@ -121,7 +181,7 @@ class ScreeningCriteria:
             raise ValueError("Max spread cents must be non-negative")
         if self.min_spread_cents is not None and self.min_spread_cents < 0:
             raise ValueError("Min spread cents must be non-negative")
-        if self.min_liquidity is not None and self.min_liquidity < 0:
+        if self.min_liquidity_dollars is not None and self.min_liquidity_dollars < 0:
             raise ValueError("Minimum liquidity must be non-negative")
         if self.max_time_to_close_days is not None and self.max_time_to_close_days < 0:
             raise ValueError("Max time to close must be non-negative")
@@ -192,7 +252,7 @@ class Event(KalshiEvent):
 class ScreeningResult:
     """Result of market screening."""
     market: Market
-    event: Optional[Event] = None
+    event: Event
     score: float = 0.0
     reasons: List[str] = None
     timestamp: datetime = None
@@ -203,4 +263,67 @@ class ScreeningResult:
             self.timestamp = utc_now()
         if self.reasons is None:
             self.reasons = []
+
+class MarketPosition(BaseModel):
+    """Market position data from Kalshi API."""
+    fees_paid: int                        # Fees paid in cents
+    fees_paid_dollars: str                # Fees paid in dollars (as string from API)
+    last_updated_ts: str                  # Last updated timestamp
+    market_exposure: int                  # Market exposure in cents
+    market_exposure_dollars: str          # Market exposure in dollars (as string from API)
+    position: int                         # Current position (positive = long, negative = short, 0 = flat)
+    realized_pnl: int                     # Realized P&L in cents
+    realized_pnl_dollars: str             # Realized P&L in dollars (as string from API)
+    resting_orders_count: int             # Number of resting orders
+    ticker: str                           # Market ticker
+    total_traded: int                     # Total traded in cents
+    total_traded_dollars: str             # Total traded in dollars (as string from API)
+    
+    @computed_field
+    @property
+    def fees_paid_dollars_float(self) -> float:
+        """Convert fees paid from string to float."""
+        try:
+            return float(self.fees_paid_dollars)
+        except (ValueError, TypeError):
+            return 0.0
+    
+    @computed_field
+    @property
+    def market_exposure_dollars_float(self) -> float:
+        """Convert market exposure from string to float."""
+        try:
+            return float(self.market_exposure_dollars)
+        except (ValueError, TypeError):
+            return 0.0
+    
+    @computed_field
+    @property
+    def realized_pnl_dollars_float(self) -> float:
+        """Convert realized P&L from string to float."""
+        try:
+            return float(self.realized_pnl_dollars)
+        except (ValueError, TypeError):
+            return 0.0
+    
+    @computed_field
+    @property
+    def total_traded_dollars_float(self) -> float:
+        """Convert total traded from string to float."""
+        try:
+            return float(self.total_traded_dollars)
+        except (ValueError, TypeError):
+            return 0.0
+    
+    @computed_field
+    @property
+    def net_realized_pnl_dollars(self) -> float:
+        """Calculate net realized P&L after fees in dollars."""
+        return self.realized_pnl_dollars_float - self.fees_paid_dollars_float
+    
+    @computed_field
+    @property
+    def is_closed_position(self) -> bool:
+        """Check if this is a closed position (position = 0 but has trading history)."""
+        return self.position == 0 and self.total_traded > 0
 

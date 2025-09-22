@@ -4,12 +4,13 @@ Market screening logic for identifying profitable trading opportunities.
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
-import numpy as np
 
-from models import Market, ScreeningCriteria, ScreeningResult, Event, utc_now
-from kalshi_client import KalshiAPIClient
-from config import Config
+from kalshi.models import Market, Event, utc_now, ScreeningCriteria, ScreeningResult
+from kalshi import KalshiAPIClient
+from config import Config, setup_logging
 
+# Configure logging with centralized setup
+setup_logging(level=logging.INFO, include_filename=True)
 logger = logging.getLogger(__name__)
 
 class MarketScreener:
@@ -29,7 +30,7 @@ class MarketScreener:
             max_spread_percentage=self.config.MAX_SPREAD_PERCENTAGE,
             max_spread_cents=self.config.MAX_SPREAD_CENTS,
             min_spread_cents=self.config.MIN_SPREAD_CENTS,
-            min_liquidity=self.config.MIN_LIQUIDITY,
+            min_liquidity_dollars=self.config.MIN_LIQUIDITY,
             max_time_to_close_days=self.config.MAX_TIME_TO_CLOSE_DAYS,
             min_open_interest=self.config.MIN_OPEN_INTEREST,
             categories=None  # No category filtering by default
@@ -39,61 +40,81 @@ class MarketScreener:
         """Get current screening criteria."""
         return self.screening_criteria
     
-    def screen_markets(self, markets: List[Market]) -> List[ScreeningResult]:
-        """
-        Screen markets for profitable characteristics.
-        
-        Args:
-            markets: List of markets to screen
-            
-        Returns:
-            List of screening results
-        """
-        results = []
-        
-        for market in markets:
-            try:
-                result = self._screen_single_market(market)
-                results.append(result)
-            except Exception as e:
-                logger.warning(f"Failed to screen market {market.ticker}: {e}")
-                continue
-        
-        # Sort by score (highest first)
-        results.sort(key=lambda x: x.score, reverse=True)
-        return results
-    
     def screen_events(self, events: List[Event]) -> List[ScreeningResult]:
         """
-        Screen events for profitable market opportunities.
+        Screen events by screening all markets within each event.
+        
+        This is the primary screening method that should be used for event-based screening.
+        It screens each market within each event and returns results with proper event context.
         
         Args:
             events: List of events to screen
             
         Returns:
-            List of screening results with event context
+            List of screening results with event context, sorted by score (highest first)
         """
         all_results = []
         
         for event in events:
-            # Screen all markets in this event
-            market_results = self.screen_markets(event.markets)
-            
-            # Add event context to each result
-            for result in market_results:
-                result.event = event
-                all_results.append(result)
+            # Screen all markets within this event
+            event_results = self._screen_markets_in_event(event)
+            all_results.extend(event_results)
         
         # Sort by score (highest first)
         all_results.sort(key=lambda x: x.score, reverse=True)
         return all_results
     
-    def _screen_single_market(self, market: Market) -> ScreeningResult:
+    def _screen_markets_in_event(self, event: Event) -> List[ScreeningResult]:
+        """
+        Screen all markets within a single event.
+        
+        Args:
+            event: Event containing markets to screen
+            
+        Returns:
+            List of screening results for markets in this event
+        """
+        results = []
+        
+        for market in event.markets:
+            try:
+                result = self._screen_single_market(market, event)
+                results.append(result)
+            except Exception as e:
+                logger.warning(f"Failed to screen market {market.ticker} in event {event.event_ticker}: {e}")
+                continue
+        
+        return results
+    
+    def get_market_statistics(self, events: List[Event]) -> Dict[str, int]:
+        """
+        Get statistics about markets in events.
+        
+        Args:
+            events: List of events
+            
+        Returns:
+            Dictionary with market statistics
+        """
+        total_markets = sum(len(event.markets) for event in events)
+        active_markets = sum(
+            len([m for m in event.markets if m.status == 'active']) 
+            for event in events
+        )
+        
+        return {
+            'total_markets': total_markets,
+            'active_markets': active_markets,
+            'total_events': len(events)
+        }
+    
+    def _screen_single_market(self, market: Market, event: Event = None) -> ScreeningResult:
         """
         Screen a single market against the screening criteria.
         
         Args:
             market: Market to screen
+            event: Associated event (optional)
             
         Returns:
             Screening result with pass/fail flag
@@ -162,6 +183,7 @@ class MarketScreener:
         
         return ScreeningResult(
             market=market,
+            event=event,
             score=1.0 if passes_filters else 0.0,
             reasons=reasons,
             timestamp=utc_now()
@@ -192,9 +214,9 @@ class MarketScreener:
                 return False
         
         # Must have minimum liquidity (volume + open interest)
-        if self.screening_criteria.min_liquidity is not None:
-            if market.liquidity_dollars < self.screening_criteria.min_liquidity:
-                reasons.append(f"Liquidity too low: {market.liquidity_dollars} < {self.screening_criteria.min_liquidity}")
+        if self.screening_criteria.min_liquidity_dollars is not None:
+            if market.liquidity_dollars < self.screening_criteria.min_liquidity_dollars:
+                reasons.append(f"Liquidity too low: {market.liquidity_dollars} < {self.screening_criteria.min_liquidity_dollars}")
                 return False
         
         # Must be within time limit
@@ -213,61 +235,8 @@ class MarketScreener:
             self.screening_criteria.max_spread_percentage is None,
             self.screening_criteria.max_spread_cents is None,
             self.screening_criteria.min_spread_cents is None,
-            self.screening_criteria.min_liquidity is None,
+            self.screening_criteria.min_liquidity_dollars is None,
             self.screening_criteria.max_time_to_close_days is None,
             self.screening_criteria.min_open_interest is None,
             self.screening_criteria.categories is None
         ])
-    
-    def get_passing_markets(self, results: List[ScreeningResult], limit: Optional[int] = None) -> List[ScreeningResult]:
-        """
-        Get markets that pass the screening criteria.
-        
-        Args:
-            results: List of screening results
-            limit: Maximum number of markets to return (None for all)
-            
-        Returns:
-            Markets that pass the screening criteria (score > 0)
-        """
-        passing_results = [r for r in results if r.score > 0]
-        if limit is None:
-            return passing_results
-        return passing_results[:limit]
-    
-    def update_criteria(self, new_criteria: ScreeningCriteria):
-        """Update screening criteria."""
-        self.screening_criteria = new_criteria
-    
-    def get_screening_summary(self, results: List[ScreeningResult]) -> Dict[str, Any]:
-        """
-        Get summary statistics of screening results.
-        
-        Args:
-            results: List of screening results
-            
-        Returns:
-            Summary statistics
-        """
-        total_markets = len(results)
-        passing_markets = len([r for r in results if r.score > 0])
-        
-        if total_markets == 0:
-            return {
-                'total_markets': 0,
-                'passing_markets': 0,
-                'profitability_rate': 0.0,
-                'avg_score': 0.0,
-                'top_score': 0.0
-            }
-        
-        scores = [r.score for r in results]
-        
-        return {
-            'total_markets': total_markets,
-            'passing_markets': passing_markets,
-            'pass_rate': passing_markets / total_markets,
-            'avg_score': np.mean(scores),
-            'top_score': max(scores),
-            'min_score': min(scores)
-        }
