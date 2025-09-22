@@ -1,5 +1,6 @@
 .env
 .private_key.pem
+.private_key_demo.pem
 market_bot.log
 logs/*
 __pycache__/*
