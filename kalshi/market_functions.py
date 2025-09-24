@@ -18,33 +18,90 @@ from .models import Market, Event
 
 logger = logging.getLogger(__name__)
 
-def get_markets(client: KalshiHTTPClient, limit: int = 100, status: Optional[str] = None) -> List[Market]:
-    """Fetch markets from Kalshi API using the official SDK."""
+def get_markets(client: KalshiHTTPClient, limit: int = 100, status: Optional[str] = None, cursor: Optional[str] = None) -> tuple[List[Market], Optional[str]]:
+    """Fetch markets from Kalshi API using existing HTTP client methods."""
     try:
-        # Use shared SDK client factory
-        sdk_client = create_sdk_client(client)
+        # Build request parameters
+        params = {'limit': limit}
+        if status:
+            params['status'] = status
+        if cursor:
+            params['cursor'] = cursor
         
-        response = sdk_client.get_markets(limit=limit, status=status)
+        # Use existing HTTP client method (reuse existing code)
+        response = client.make_public_request('/markets', params=params)
+        
+        if response.status_code != 200:
+            logger.error(f"API call failed: {response.status_code} - {response.text}")
+            return []
+        
+        data = response.json()
         markets = []
         
-        for market_data in response.markets or []:
+        # Process markets from response
+        for market_dict in data.get('markets', []):
             try:
-                # Convert the SDK response to our Market model
-                market_dict = market_data.to_dict()
-                
                 # Preprocess market data to handle known issues
                 cleaned_market_dict = preprocess_market_data(market_dict)
-                
-                markets.append(Market.model_validate(cleaned_market_dict, strict=False))
+                if len(cleaned_market_dict) == 0:
+                    continue
+                    
+                market = Market.model_validate(cleaned_market_dict, strict=False)
+                markets.append(market)
             except Exception as e:
-                ticker = getattr(market_data, 'ticker', 'unknown')
+                ticker = market_dict.get('ticker', 'unknown')
                 logger.warning(f"Skipping invalid market {ticker}: {e}")
                 continue
         
-        return markets
+        # Extract cursor for next page
+        next_cursor = data.get('cursor')
+        return markets, next_cursor
         
     except Exception as e:
-        logger.error(f"Failed to fetch markets: {e}")
+        logger.error(f"Error fetching markets: {e}")
+        return [], None
+
+def get_all_markets(client: KalshiHTTPClient, status: Optional[str] = None, max_markets: Optional[int] = None) -> List[Market]:
+    """Get all markets using pagination, following the same pattern as portfolio functions."""
+    try:
+        all_markets = []
+        cursor = None
+        request_count = 0
+        max_requests = 20  # Safety limit
+        
+        while request_count < max_requests:
+            # Get markets for this page
+            markets, next_cursor = get_markets(client, limit=200, status=status, cursor=cursor)
+            
+            if not markets:
+                logger.info(f"No more markets found on page {request_count + 1}")
+                break
+            
+            all_markets.extend(markets)
+            logger.info(f"Retrieved {len(markets)} markets on page {request_count + 1}, total so far: {len(all_markets)}")
+            
+            # Check if we've reached our limit
+            if max_markets and len(all_markets) >= max_markets:
+                logger.info(f"Reached max markets limit: {max_markets}")
+                break
+            
+            # Check if there are more pages
+            cursor = next_cursor
+            if not cursor:
+                logger.info("No more pages available")
+                break
+                
+            request_count += 1
+            
+            # Small delay to be respectful to the API
+            if cursor:  # Only delay if there are more pages
+                time.sleep(0.1)
+        
+        logger.info(f"Total markets retrieved: {len(all_markets)}")
+        return all_markets[:max_markets] if max_markets else all_markets
+        
+    except Exception as e:
+        logger.error(f"Error fetching all markets: {e}")
         return []
 
 def get_market_by_ticker(client: KalshiHTTPClient, ticker: str) -> Optional[Market]:

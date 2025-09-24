@@ -37,8 +37,14 @@ def preprocess_market_data(data):
         # Handle status field - map non-standard values to valid enum values
         status = cleaned.get('status')
         if status and status not in VALID_MARKET_STATUSES:
-            logger.info(f"Converting non-standard status '{status}' to 'closed' for ticker: {cleaned.get('ticker', 'unknown')}")
-            cleaned['status'] = 'closed'
+            if status == 'finalized':
+                logger.info(f"Converting status 'finalized' to 'settled' for ticker: {cleaned.get('ticker', 'unknown')}")
+                cleaned['status'] = 'settled'
+            else:
+                logger.info(f"Converting non-standard status '{status}' to 'closed' for ticker: {cleaned.get('ticker', 'unknown')}")
+                cleaned['status'] = 'closed'
+        elif status == 'finalized':
+            logger.info(f"Status 'finalized' found for ticker: {cleaned.get('ticker', 'unknown')} - should be in VALID_MARKET_STATUSES")
         
         # Recursively clean nested structures
         for key, value in cleaned.items():

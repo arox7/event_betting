@@ -208,13 +208,13 @@ class KalshiWebSocketClient:
             "id": msg_id,
             "cmd": "subscribe",
             "params": {
-                "channels": ["trades"],
+                "channels": ["trade"],
                 "market_ticker": market_tickers[0] if market_tickers else None
             }
         }
         
         self.subscriptions.add(json.dumps(subscription))
-        self._register_callback("trades", callback)
+        self._register_callback("trade", callback)
         
         if self.running and self.ws:
             # Create task and store it to prevent garbage collection

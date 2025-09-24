@@ -8,7 +8,7 @@ from datetime import datetime
 from config import Config, setup_logging
 from .http_client import KalshiHTTPClient
 from .market_functions import (
-    get_markets, get_market_by_ticker, get_markets_by_tickers, 
+    get_markets, get_all_markets, get_market_by_ticker, get_markets_by_tickers, 
     get_market_orderbook, get_events, get_events_by_tickers
 )
 from .portfolio_functions import (
@@ -34,7 +34,12 @@ class KalshiAPIClient:
     # Market Functions
     def get_markets(self, limit: int = 100, status: Optional[str] = None) -> List[Any]:
         """Fetch markets from Kalshi API."""
-        return get_markets(self.http_client, limit, status)
+        markets, _ = get_markets(self.http_client, limit, status)
+        return markets
+    
+    def get_all_markets(self, status: Optional[str] = None, max_markets: Optional[int] = None) -> List[Any]:
+        """Get all markets using pagination."""
+        return get_all_markets(self.http_client, status, max_markets)
     
     def get_market_by_ticker(self, ticker: str) -> Optional[Any]:
         """Fetch a specific market by ticker."""

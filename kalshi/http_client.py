@@ -122,7 +122,7 @@ class KalshiHTTPClient:
         )
         return base64.b64encode(signature).decode('utf-8')
     
-    def make_authenticated_request(self, method: str, path: str, params: Optional[Dict] = None) -> requests.Response:
+    def make_authenticated_request(self, method: str, path: str, params: Optional[Dict] = None, json_data: Optional[Dict] = None) -> requests.Response:
         """Make an authenticated request to the Kalshi API using raw HTTP."""
         if not self.config.KALSHI_API_KEY_ID or not self._private_key:
             raise Exception("API credentials not properly configured")
@@ -148,7 +148,7 @@ class KalshiHTTPClient:
         
         # Make request - base URL already includes /trade-api/v2
         url = base_url.rstrip('/') + path
-        return requests.request(method, url, headers=headers, params=params)
+        return requests.request(method, url, headers=headers, params=params, json=json_data)
     
     def make_public_request(self, path: str, params: Optional[Dict] = None) -> requests.Response:
         """Make a public (unauthenticated) request to the Kalshi API."""
