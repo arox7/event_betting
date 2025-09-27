@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from kalshi import KalshiAPIClient
-from kalshi.models import utc_now, MarketPosition
+from kalshi.models import et_now, MarketPosition
 
 # Note: portfolio.py doesn't need to configure logging as it's imported by dashboard modules
 # that will configure logging. We just get the logger here.
@@ -50,7 +50,7 @@ class PortfolioPage:
         
         # Show data freshness indicator
         if st.session_state.portfolio_data and st.session_state.portfolio_last_update:
-            time_diff = utc_now() - st.session_state.portfolio_last_update
+            time_diff = et_now() - st.session_state.portfolio_last_update
             seconds_ago = int(time_diff.total_seconds())
             if seconds_ago < 10:
                 st.caption("🟢 Data is current (real-time updates active)")
@@ -148,7 +148,7 @@ class PortfolioPage:
                 
                 # Store unfiltered data in session state
                 st.session_state.portfolio_data = portfolio_metrics
-                st.session_state.portfolio_last_update = utc_now()
+                st.session_state.portfolio_last_update = et_now()
                 
                 # Clear enriched closed positions cache since we have new data
                 st.session_state.enriched_closed_positions_cache = None
@@ -509,7 +509,7 @@ class PortfolioPage:
                 self._apply_date_filtering()
                 
                 # Update last update time
-                st.session_state.portfolio_last_update = utc_now()
+                st.session_state.portfolio_last_update = et_now()
                 
                 logger.info("Position data updated successfully")
                 
@@ -542,7 +542,7 @@ class PortfolioPage:
                     st.session_state.portfolio_data['unrealized_pnl_data'] = all_unrealized_pnl
                     
                     # Update last update time
-                    st.session_state.portfolio_last_update = utc_now()
+                    st.session_state.portfolio_last_update = et_now()
                     
                     logger.info("Market price data updated successfully")
                 else:

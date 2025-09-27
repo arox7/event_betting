@@ -4,7 +4,7 @@ Data models for the Kalshi market making bot.
 import logging
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from kalshi_python.models.market import Market as KalshiMarket
 from kalshi_python.models.event import Event as KalshiEvent
 from pydantic import BaseModel, computed_field, field_validator, ValidationError
@@ -13,12 +13,16 @@ from pydantic import BaseModel, computed_field, field_validator, ValidationError
 # that will configure logging. We just get the logger here.
 logger = logging.getLogger(__name__)
 
-def utc_now() -> datetime:
-    """Get current UTC datetime."""
-    return datetime.now(timezone.utc)
+def et_now() -> datetime:
+    """Get current Eastern Time datetime."""
+    eastern_tz = timezone(timedelta(hours=-5))  # EST (UTC-5)
+    return datetime.now(eastern_tz)
 
 class Market(KalshiMarket):
     """Extended Kalshi Market model with additional helper methods."""
+    
+    # Override status field to allow additional status values
+    status: Optional[str] = None
     
     # Additional fields not in the base KalshiMarket class
     open_interest: Optional[int] = None
@@ -131,7 +135,7 @@ class Market(KalshiMarket):
         if self.close_time is None:
             return None
         
-        now = utc_now()
+        now = et_now()
         return (self.close_time - now).days
 
     @computed_field
@@ -141,7 +145,7 @@ class Market(KalshiMarket):
         if self.open_time is None:
             return None
         
-        now = utc_now()
+        now = et_now()
         return (now - self.open_time).days
     
     @computed_field
@@ -266,7 +270,7 @@ class ScreeningResult:
     def __post_init__(self):
         """Set timestamp if not provided."""
         if not hasattr(self, 'timestamp') or self.timestamp is None:
-            self.timestamp = utc_now()
+            self.timestamp = et_now()
         if self.reasons is None:
             self.reasons = []
 

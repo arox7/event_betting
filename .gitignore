@@ -4,3 +4,12 @@
 market_bot.log
 logs/*
 __pycache__/*
+
+# Database files (large raw data)
+data/*.db
+data/trades.db
+data/trades_backup_*.db
+
+# Log files
+dashboard/logs/*
+*.log

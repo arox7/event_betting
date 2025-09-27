@@ -77,6 +77,22 @@ The dashboard will be available at `http://localhost:8501`
 
 ## Dashboard Features
 
+### **Site Analytics**
+- **Daily Trade Volume Chart**: Interactive line chart showing the latest 7 days of trading volume
+- **Hourly Volume Analysis**: Average hourly trading volume patterns across the latest 7 days
+- **Trade Volume by Category**: Stacked bar chart showing percentage breakdown by market categories
+- **Analytics Metrics**: Key performance indicators including total volume, trade count, and average trade size
+- **Real-time Data**: All charts automatically show the most recent 7 days of available data
+- **Eastern Time Display**: All timestamps and data are displayed in Eastern Time (ET) for consistency
+
+### **Market Analytics**
+- **Top Traded Markets by Volume**: Ranked list of the top 5 markets by total trading volume
+- **Top Traded Markets by Trade Count**: Ranked list of the top 5 markets by number of trades
+- **Market Details**: Each market shows volume, trade count, and average trade size
+- **Readable Market Names**: Displays full market titles instead of cryptic ticker symbols
+- **7-Day Lookback**: Rankings based on the latest 7 days of trading activity
+- **API-Enhanced Data**: Market titles fetched from Kalshi API for better readability
+
 ### **Portfolio Management**
 - **Complete Portfolio Tracking**: Cash balance, positions, and accurate P&L calculations
 - **Real-time Market Values**: Current market prices and position values
@@ -160,11 +176,23 @@ event_betting/
 ├── SETUP.md                  # Detailed setup instructions
 ├── dashboard/                # Dashboard application
 │   ├── __init__.py
-│   ├── dashboard.py          # Main dashboard interface
+│   ├── dashboard.py          # Main dashboard interface with Site Analytics
 │   ├── main.py              # Alternative dashboard entry point
 │   ├── portfolio.py         # Portfolio management page
 │   ├── screener.py          # Market screening page
 │   └── constants.py         # Dashboard constants
+├── database/                 # Database models and operations
+│   ├── __init__.py
+│   └── models.py            # SQLite database schema and operations
+├── etl/                     # Extract, Transform, Load processes
+│   ├── __init__.py
+│   ├── trades_etl.py        # Trades data ETL pipeline
+│   ├── events_etl.py        # Events data ETL pipeline
+│   └── markets_etl.py       # Markets data ETL pipeline
+├── scripts/                 # Utility scripts
+│   ├── run_etl.sh          # ETL execution script
+│   ├── fetch_all_markets.py # Market data fetching
+│   └── cleanup_retention.py # Data retention cleanup
 ├── kalshi/                   # Kalshi API integration
 │   ├── __init__.py
 │   ├── client.py            # Kalshi API client
@@ -231,6 +259,33 @@ The dashboard is built with Streamlit and can be customized by modifying files i
 - Integrate additional AI capabilities
 - Extend portfolio tracking features
 
+## Data Management
+
+### **ETL Pipeline**
+The dashboard includes a comprehensive ETL (Extract, Transform, Load) system for managing historical data:
+
+- **Trades ETL**: Fetches and processes historical trade data from Kalshi API
+- **Events ETL**: Processes market event data and categories
+- **Markets ETL**: Handles market metadata and information
+- **Automated Aggregations**: Pre-computed daily, hourly, and category-level aggregations
+- **Data Retention**: Configurable retention policies for raw and aggregated data
+
+### **Database Schema**
+- **Raw Tables**: `trades`, `events`, `markets` - Individual records from Kalshi API
+- **Aggregate Tables**: `daily_aggregations`, `hourly_aggregations`, `daily_category_aggregations`
+- **Eastern Time Storage**: All timestamps stored in Eastern Time (ET) for consistency
+- **SQLite Database**: Local storage in `data/trades.db`
+
+### **Data Backfill**
+Use the ETL scripts to backfill missing data:
+```bash
+# Backfill specific dates
+python scripts/run_backfill.py
+
+# Run ETL for specific date
+python etl/trades_etl.py --date 2025-09-26
+```
+
 ## Troubleshooting
 
 ### Common Issues
@@ -242,6 +297,8 @@ The dashboard is built with Streamlit and can be customized by modifying files i
 5. **Portfolio Data Missing**: Check that your Kalshi API credentials are valid and authenticated
 6. **Permission Errors**: Make sure the startup script is executable: `chmod +x run_dashboard.sh`
 7. **Portfolio Values Incorrect**: Use the refresh button to update portfolio data manually
+8. **Charts Showing Old Data**: Run ETL to backfill missing data or check cron job status
+9. **Import Errors**: Ensure you're running from the project root directory
 
 ### Debug Mode
 

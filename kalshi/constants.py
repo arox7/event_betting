@@ -3,7 +3,7 @@ Constants for the Kalshi API package.
 """
 
 # Market status constants
-VALID_MARKET_STATUSES = {'initialized', 'active', 'closed', 'settled', 'determined'}
+VALID_MARKET_STATUSES = {'initialized', 'active', 'closed', 'settled', 'determined', 'finalized'}
 
 # Cache TTL settings (in seconds)
 CACHE_TTL = {

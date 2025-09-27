@@ -5,7 +5,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 
-from kalshi.models import Market, Event, utc_now, ScreeningCriteria, ScreeningResult
+from kalshi.models import Market, Event, et_now, ScreeningCriteria, ScreeningResult
 from kalshi import KalshiAPIClient
 from config import Config, setup_logging
 
@@ -202,7 +202,7 @@ class MarketScreener:
             event=event,
             score=1.0 if passes_filters else 0.0,
             reasons=reasons,
-            timestamp=utc_now()
+            timestamp=et_now()
         )
     
     def _check_basic_requirements(self, market: Market, reasons: List[str]) -> bool:

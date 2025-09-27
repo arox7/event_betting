@@ -622,7 +622,7 @@ def screen_markets(market: Market, event: Event) -> tuple[bool, list[str]]:
     reasons = []
     
     if market.close_time:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone(timedelta(hours=-5)))  # Eastern Time
         time_to_close = market.close_time - now
         
         if time_to_close <= timedelta(minutes=5) and time_to_close > timedelta(0):
@@ -646,17 +646,17 @@ def screen_markets(market: Market, event: Event) -> tuple[bool, list[str]]:
     
     # SAFE: Check if open_time exists before calling methods on it
     if market.open_time:
-        now_utc = datetime.now(timezone.utc)
-        today_utc_date = now_utc.date()
+        now_et = datetime.now(timezone(timedelta(hours=-5)))  # Eastern Time
+        today_et_date = now_et.date()
         
-        # SAFE: Convert timezone, then get date
-        market_open_date_utc = market.open_time.astimezone(timezone.utc).date()
+        # Convert timezone, then get date
+        market_open_date_et = market.open_time.astimezone(timezone(timedelta(hours=-5))).date()
         
-        if market_open_date_utc == today_utc_date:
+        if market_open_date_et == today_et_date:
             passes = True
-            reasons.append(f"Opened today: {market.open_time.strftime('%Y-%m-%d %H:%M UTC')}")
+            reasons.append(f"Opened today: {market.open_time.strftime('%Y-%m-%d %H:%M ET')}")
         else:
-            reasons.append(f"Did not open today (opened {market_open_date_utc})")
+            reasons.append(f"Did not open today (opened {market_open_date_et})")
     else:
         # SAFE: Handle None case
         reasons.append("No open time available")

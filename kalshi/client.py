@@ -9,7 +9,8 @@ from config import Config, setup_logging
 from .http_client import KalshiHTTPClient
 from .market_functions import (
     get_markets, get_market_by_ticker, get_markets_by_tickers, 
-    get_market_orderbook, get_events, get_events_by_tickers
+    get_market_orderbook, get_events, get_events_by_tickers,
+    get_trades_with_pagination
 )
 from .portfolio_functions import (
     get_balance_dollars, get_all_positions, get_active_positions_only, get_settled_positions,
@@ -55,6 +56,10 @@ class KalshiAPIClient:
     def get_events_by_tickers(self, event_tickers: List[str]) -> Dict[str, Any]:
         """Fetch multiple events by tickers in batch."""
         return get_events_by_tickers(self.http_client, event_tickers)
+    
+    def get_trades(self, limit: int = 1000, min_ts: Optional[int] = None, max_ts: Optional[int] = None, max_trades: int = 500000) -> List[Dict[str, Any]]:
+        """Fetch trades from Kalshi API with pagination and retry handling."""
+        return get_trades_with_pagination(self.http_client, limit, min_ts, max_ts, max_trades=max_trades)
     
     # Portfolio Functions
     def get_balance_dollars(self) -> Optional[float]:

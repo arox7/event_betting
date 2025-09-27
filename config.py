@@ -66,3 +66,8 @@ class Config:
     # Dashboard settings
     DASHBOARD_REFRESH_INTERVAL = 5  # seconds
     MAX_EVENTS = 4000  # Maximum number of events to fetch
+    
+    # Data Retention Configuration
+    TRADES_RETENTION_DAYS = int(os.getenv('TRADES_RETENTION_DAYS', '14'))  # Keep raw trades for 2 weeks
+    AGGREGATIONS_RETENTION_DAYS = int(os.getenv('AGGREGATIONS_RETENTION_DAYS', '800'))  # Keep aggregations for 800 days
+    ENABLE_AUTOMATIC_CLEANUP = os.getenv('ENABLE_AUTOMATIC_CLEANUP', 'true').lower() == 'true'  # Enable automatic cleanup in ETL

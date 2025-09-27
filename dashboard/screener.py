@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from kalshi import KalshiAPIClient
 from screening import MarketScreener, GeminiScreener
-from kalshi.models import ScreeningResult, utc_now
+from kalshi.models import ScreeningResult, et_now
 from config import Config
 from constants import (
     DEFAULT_SCREENING_CRITERIA, 
@@ -49,7 +49,7 @@ class ScreenerPage:
         if not st.session_state.cached_events or not st.session_state.cached_events_timestamp:
             return False
         
-        cache_age = utc_now() - st.session_state.cached_events_timestamp
+        cache_age = et_now() - st.session_state.cached_events_timestamp
         return cache_age.total_seconds() < 60  # 1 minute TTL
     
     def _get_cached_or_fresh_events(self, force_refresh: bool = False):
@@ -62,7 +62,7 @@ class ScreenerPage:
         
         # Update cache
         st.session_state.cached_events = events
-        st.session_state.cached_events_timestamp = utc_now()
+        st.session_state.cached_events_timestamp = et_now()
         
         return events
     
@@ -84,7 +84,7 @@ class ScreenerPage:
         
         # Show cache status
         if st.session_state.cached_events_timestamp:
-            cache_age = utc_now() - st.session_state.cached_events_timestamp
+            cache_age = et_now() - st.session_state.cached_events_timestamp
             if cache_age.total_seconds() < 60:
                 st.caption(f"📊 Data cached {int(cache_age.total_seconds())}s ago")
             else:
@@ -127,7 +127,7 @@ class ScreenerPage:
                 
                 # Store results
                 st.session_state.screening_results = results
-                st.session_state.last_update = utc_now()
+                st.session_state.last_update = et_now()
                 
         except Exception as e:
             st.error(f"{MESSAGES['screening_error']}: {e}")
@@ -234,7 +234,7 @@ class ScreenerPage:
                 
                 # Store results
                 st.session_state.screening_results = results
-                st.session_state.last_update = utc_now()
+                st.session_state.last_update = et_now()
                 
                 # Show summary
                 stats = self.screener.get_market_statistics(events)
@@ -292,7 +292,7 @@ class ScreenerPage:
                 st.session_state.ai_query_used = user_query
                 st.session_state.ai_screening_code = screening_code
                 st.session_state.ai_criteria_explanation = criteria_explanation
-                st.session_state.last_update = utc_now()
+                st.session_state.last_update = et_now()
                 
                 # Show summary
                 stats = self.screener.get_market_statistics(events)
@@ -348,7 +348,7 @@ class ScreenerPage:
             
             # Time to close
             if market.close_time:
-                time_to_close = (market.close_time - utc_now()).total_seconds() / 3600  # hours
+                time_to_close = (market.close_time - et_now()).total_seconds() / 3600  # hours
                 
                 if time_to_close < 1:
                     # Less than 1 hour - show in minutes

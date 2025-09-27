@@ -121,7 +121,7 @@ class SimpleDashboard:
         col1, col2, col3 = st.columns(3)
         with col2:
             if st.session_state.last_update:
-                st.caption(f"Last updated: {st.session_state.last_update.strftime('%H:%M:%S UTC')}")
+                st.caption(f"Last updated: {st.session_state.last_update.strftime('%H:%M:%S ET')}")
             else:
                 st.caption("Dashboard ready")
 

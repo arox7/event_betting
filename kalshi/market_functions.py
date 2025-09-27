@@ -4,7 +4,7 @@ Kalshi Market Functions - Market, event, and orderbook operations.
 import logging
 import time
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pprint import pprint
 
 import requests
@@ -31,6 +31,10 @@ def get_markets(client: KalshiHTTPClient, limit: int = 100, status: Optional[str
             try:
                 # Convert the SDK response to our Market model
                 market_dict = market_data.to_dict()
+                
+                # Handle status mapping for non-standard statuses
+                if market_dict.get("status") == "finalized":
+                    market_dict["status"] = "settled"
                 
                 # Preprocess market data to handle known issues
                 cleaned_market_dict = preprocess_market_data(market_dict)
@@ -174,7 +178,7 @@ def get_market_orderbook(client: KalshiHTTPClient, ticker: str) -> Optional[Dict
                 'yes_ask': orderbook.yes_ask,
                 'no_bid': orderbook.no_bid,
                 'no_ask': orderbook.no_ask,
-                'timestamp': datetime.now(timezone.utc)
+                'timestamp': datetime.now(timezone(timedelta(hours=-5)))  # Eastern Time
             }
         return None
     except Exception as e:
@@ -283,3 +287,110 @@ def get_events(client: KalshiHTTPClient, limit: int = 100, status: Optional[str]
     except Exception as e:
         logger.error(f"Error fetching events: {e}")
         return []
+
+def get_trades_with_pagination(
+    client: KalshiHTTPClient,
+    limit: int = 1000,
+    min_ts: Optional[int] = None,
+    max_ts: Optional[int] = None,
+    max_retries: int = 3,
+    retry_delay: float = 1.0,
+    max_trades: int = 500000
+) -> List[Dict[str, Any]]:
+    """
+    Fetch all trades from Kalshi API with proper pagination and retry handling.
+    
+    Args:
+        client: KalshiHTTPClient instance
+        limit: Number of trades per request (max 1000)
+        min_ts: Minimum timestamp (Unix timestamp in seconds)
+        max_ts: Maximum timestamp (Unix timestamp in seconds)
+        max_retries: Maximum number of retry attempts
+        retry_delay: Initial delay between retries (exponential backoff)
+        max_trades: Maximum total number of trades to fetch (default: 500,000)
+    
+    Returns:
+        List of all trades (up to max_trades limit)
+    """
+    all_trades = []
+    cursor = None
+    retry_count = 0
+    
+    logger.info(f"Starting trades fetch with limit={limit}, min_ts={min_ts}, max_ts={max_ts}, max_trades={max_trades}")
+    
+    while len(all_trades) < max_trades:
+        # Build request parameters
+        remaining_trades = max_trades - len(all_trades)
+        request_limit = min(limit, 1000, remaining_trades)  # Kalshi API max limit is 1000
+        
+        params = {
+            'limit': request_limit
+        }
+        
+        if cursor:
+            params['cursor'] = cursor
+        if min_ts is not None:
+            params['min_ts'] = min_ts
+        if max_ts is not None:
+            params['max_ts'] = max_ts
+        
+        # Make request with retry logic
+        success = False
+        current_retry = 0
+        
+        while current_retry <= max_retries and not success:
+            try:
+                logger.info(f"Fetching trades page (cursor: {cursor[:20] if cursor else 'None'}...)")
+                
+                response = client.make_public_request('/markets/trades', params=params)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    if 'trades' in data:
+                        trades = data['trades']
+                        all_trades.extend(trades)
+                        
+                        logger.info(f"Fetched {len(trades)} trades (total: {len(all_trades)})")
+                        
+                        # Check if we've reached the max limit
+                        if len(all_trades) >= max_trades:
+                            logger.info(f"Reached maximum trade limit of {max_trades}")
+                            break
+                        
+                        # Check for next page
+                        cursor = data.get('cursor')
+                        if not cursor:
+                            logger.info("No more pages - pagination complete")
+                            break
+                        
+                        success = True
+                        retry_count = 0  # Reset retry count on success
+                        
+                    else:
+                        logger.warning(f"Unexpected response format: {data}")
+                        success = True  # Don't retry on format issues
+                        break
+                else:
+                    logger.warning(f"HTTP {response.status_code}: {response.text}")
+                    success = False
+                    
+            except Exception as e:
+                current_retry += 1
+                retry_count += 1
+                
+                if current_retry <= max_retries:
+                    wait_time = retry_delay * (2 ** (current_retry - 1))  # Exponential backoff
+                    logger.warning(f"Request failed (attempt {current_retry}/{max_retries + 1}): {e}")
+                    logger.info(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Max retries exceeded. Last error: {e}")
+                    raise e
+        
+        # If we couldn't get a successful response after all retries, break
+        if not success:
+            break
+    
+    logger.info(f"Trades fetch complete. Total trades: {len(all_trades)}")
+    return all_trades
