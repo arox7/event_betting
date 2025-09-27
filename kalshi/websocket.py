@@ -4,6 +4,7 @@ Kalshi WebSocket client for real-time data streaming.
 import asyncio
 import json
 import logging
+import contextlib
 import websockets
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime, timezone
@@ -38,6 +39,7 @@ class KalshiWebSocketClient:
         self.reconnect_delay = 2
         self.message_id_counter = 0
         self.subscription_ids = {}  # Track subscription IDs
+        self._listener_task = None
         
         # Initialize private key for authentication
         self._private_key = None
@@ -131,7 +133,7 @@ class KalshiWebSocketClient:
             logger.info("Successfully connected to Kalshi WebSocket")
             
             # Start the message listener
-            asyncio.create_task(self._listen())
+            self._listener_task = asyncio.create_task(self._listen())
             
             # Resubscribe to all previous subscriptions
             for subscription in self.subscriptions:
@@ -147,6 +149,11 @@ class KalshiWebSocketClient:
         if self.ws:
             await self.ws.close()
             logger.info("Disconnected from Kalshi WebSocket")
+        if self._listener_task:
+            self._listener_task.cancel()
+            with contextlib.suppress(Exception):
+                await self._listener_task
+            self._listener_task = None
     
     async def _send_subscription(self, subscription: Dict[str, Any]):
         """Send a subscription message."""
@@ -371,7 +378,8 @@ class KalshiWebSocketClient:
             
             try:
                 await self.connect()
-                await self._listen()
+                if self._listener_task:
+                    await self._listener_task
                 return  # Successfully reconnected
             except Exception as e:
                 logger.error(f"Reconnection attempt {self.reconnect_attempts} failed: {e}")
@@ -383,7 +391,8 @@ class KalshiWebSocketClient:
         """Start the WebSocket client."""
         try:
             await self.connect()
-            await self._listen()
+            if self._listener_task:
+                await self._listener_task
         except Exception as e:
             logger.error(f"WebSocket client error: {e}")
             if self.running:

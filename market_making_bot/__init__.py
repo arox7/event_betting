@@ -9,9 +9,12 @@ market tickers, public trades, and user fills.
 __version__ = "1.0.0"
 __author__ = "Event Betting Team"
 
-from .mm_ws_listener import MarketMakingListener, run_market_making_listener
+from .mm_ws_listener import MarketMakingListener, run_listener
+from .strategy import StrategyEngine, StrategyConfig
 
 __all__ = [
     "MarketMakingListener",
-    "run_market_making_listener"
+    "run_listener",
+    "StrategyEngine",
+    "StrategyConfig",
 ]

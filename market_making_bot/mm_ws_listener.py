@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 """
 Market Making WebSocket Listener for Kalshi.
-
-Usage:
-    python mm_ws_listener.py --ticker KXEPSTEINLIST-26-HKIS
-    python mm_ws_listener.py --ticker KXEPSTEINLIST-26-HKIS --with-private --side yes
 """
 
-import asyncio
+from __future__ import annotations
+
 import argparse
+import asyncio
 import logging
-import json
 import sys
-from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+import contextlib
+import json
 
-# Ensure the project root is on the Python path when running this file directly
 ROOT_PATH = Path(__file__).resolve().parents[1]
 if str(ROOT_PATH) not in sys.path:
     sys.path.insert(0, str(ROOT_PATH))
@@ -30,8 +27,8 @@ from config import Config, setup_logging
 from kalshi.websocket import KalshiWebSocketClient
 from kalshi.client import KalshiAPIClient
 from orderbook_tracker import OrderBookTracker, OrderBookError
+from strategy import StrategyConfig, StrategyEngine
 
-# Configure logging
 setup_logging(level=logging.INFO, include_filename=True)
 logger = logging.getLogger(__name__)
 
@@ -40,659 +37,350 @@ def timestamp() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
-@dataclass
-class StrategyConfig:
-    ticker: str
-    side: str = "yes"  # "yes" or "no"
-    lot_contracts: int = 5
-    min_spread_cents: int = 3
-    improve_if_last: bool = True
-    queue_big_thresh_contracts: int = 400
-    cancel_move_ticks: int = 2
-    max_inventory_contracts: int = 100
-    quote_ttl_seconds: int = 6
-    reduce_only_step_contracts: int = 10
-
-
-@dataclass
-class MockOrder:
-    price_cents: int
-    remaining_contracts: int
-    side: str
-    expires_at: datetime
-
-
-class MockMarketMaker:
-    """One-sided market maker that prints intended actions."""
-
-    def __init__(self, config: StrategyConfig) -> None:
-        self.cfg = config
-        self.position_contracts = 0  # YES long positive, NO long negative
-        self.last_mid_cents: Optional[float] = None
-        self.active_order: Optional[MockOrder] = None
-        self._cached_orderbook = OrderBookTracker()
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def update_orderbook_cache(self, orderbook: OrderBookTracker) -> None:
-        self._cached_orderbook = orderbook
-
-    def _inventory_ok(self) -> bool:
-        if self.cfg.side == "yes":
-            return self.position_contracts < self.cfg.max_inventory_contracts
-        return -self.position_contracts < self.cfg.max_inventory_contracts
-
-    def _mid_price_cents(self, orderbook: OrderBookTracker) -> Optional[float]:
-        bid = orderbook.best_bid(self.cfg.side).price
-        ask = orderbook.best_ask(self.cfg.side).price
-        if bid is None or ask is None:
-            return None
-        return (bid + ask) / 2.0
-
-    def _spread_cents(self, orderbook: OrderBookTracker) -> Optional[int]:
-        return orderbook.spread(self.cfg.side)
-
-    def _best_prices(self, orderbook: OrderBookTracker) -> tuple[Optional[int], Optional[int], int, int]:
-        best_bid = orderbook.best_bid(self.cfg.side)
-        best_ask = orderbook.best_ask(self.cfg.side)
-        return best_bid.price, best_ask.price, best_bid.size, best_ask.size
-
-    def _select_target_price(self, orderbook: OrderBookTracker) -> Optional[int]:
-        bid_price_cents, ask_price_cents, bid_size_contracts, ask_size_contracts = self._best_prices(orderbook)
-        spread_cents = self._spread_cents(orderbook)
-
-        if bid_price_cents is None or ask_price_cents is None or spread_cents is None:
-            return None
-        if spread_cents < self.cfg.min_spread_cents:
-            return None
-
-        target_price_cents = bid_price_cents if self.cfg.side == "yes" else ask_price_cents
-
-        if self.cfg.side == "yes":
-            if (
-                self.cfg.improve_if_last
-                and bid_size_contracts < 50
-                and spread_cents >= (self.cfg.min_spread_cents + 1)
-            ):
-                target_price_cents = min(100, target_price_cents + 1)
-            if (
-                bid_size_contracts >= self.cfg.queue_big_thresh_contracts
-                and (ask_price_cents - max(0, target_price_cents - 1)) >= self.cfg.min_spread_cents
-            ):
-                target_price_cents = max(0, target_price_cents - 1)
-        else:
-            if (
-                self.cfg.improve_if_last
-                and ask_size_contracts < 50
-                and spread_cents >= (self.cfg.min_spread_cents + 1)
-            ):
-                target_price_cents = max(0, target_price_cents - 1)
-            if (
-                ask_size_contracts >= self.cfg.queue_big_thresh_contracts
-                and (min(100, target_price_cents + 1) - bid_price_cents) >= self.cfg.min_spread_cents
-            ):
-                target_price_cents = min(100, target_price_cents + 1)
-
-        return target_price_cents
-
-    # ------------------------------------------------------------------
-    # Strategy entry points
-    # ------------------------------------------------------------------
-
-    def on_orderbook(self, orderbook: OrderBookTracker) -> None:
-        self.update_orderbook_cache(orderbook)
-        mid_cents = self._mid_price_cents(orderbook)
-        spread_cents = self._spread_cents(orderbook)
-
-        if mid_cents is not None:
-            if (
-                self.last_mid_cents is not None
-                and abs(mid_cents - self.last_mid_cents) >= self.cfg.cancel_move_ticks
-                and self.active_order
-            ):
-                print(
-                    f"{timestamp()}  [MOVE] mid moved ≥ {self.cfg.cancel_move_ticks} ticks → cancel/reprice"
-                )
-                self.active_order = None
-            self.last_mid_cents = mid_cents
-
-        if not self._inventory_ok():
-            if self.active_order:
-                print(
-                    f"{timestamp()}  [CANCEL] pos cap hit (pos={self.position_contracts}); "
-                    f"pulling {self.cfg.side.upper()} {self.active_order.remaining_contracts} @ {self.active_order.price_cents}¢"
-                )
-                self.active_order = None
-            print(
-                f"{timestamp()}  [REDUCE-ONLY] would send IOC reduce-only for {self.cfg.side.upper()} "
-                f"{min(self.cfg.reduce_only_step_contracts, abs(self.position_contracts))} contracts"
-            )
-            return
-
-        target_price_cents = self._select_target_price(orderbook)
-        if target_price_cents is None:
-            if self.active_order:
-                print(
-                    f"{timestamp()}  [CANCEL] spread {spread_cents}¢ < min {self.cfg.min_spread_cents}¢; "
-                    f"pulling {self.cfg.side.upper()} {self.active_order.remaining_contracts} @ {self.active_order.price_cents}¢"
-                )
-                self.active_order = None
-            return
-
-        now = datetime.utcnow()
-        if not self.active_order:
-            self.active_order = MockOrder(
-                price_cents=target_price_cents,
-                remaining_contracts=self.cfg.lot_contracts,
-                side=self.cfg.side,
-                expires_at=now + timedelta(seconds=self.cfg.quote_ttl_seconds),
-            )
-            print(
-                f"{timestamp()}  [POST] {self.cfg.ticker} {self.cfg.side.upper()} "
-                f"{self.cfg.lot_contracts} @ {target_price_cents}¢ (post_only, ttl≈{self.cfg.quote_ttl_seconds}s)"
-            )
-            return
-
-        if now >= self.active_order.expires_at:
-            print(f"{timestamp()}  [EXPIRE] local quote expired; refreshing")
-            self.active_order = MockOrder(
-                price_cents=target_price_cents,
-                remaining_contracts=self.cfg.lot_contracts,
-                side=self.cfg.side,
-                expires_at=now + timedelta(seconds=self.cfg.quote_ttl_seconds),
-            )
-            print(
-                f"{timestamp()}  [POST] {self.cfg.ticker} {self.cfg.side.upper()} "
-                f"{self.cfg.lot_contracts} @ {target_price_cents}¢ (post_only)"
-            )
-            return
-
-        if self.active_order.price_cents != target_price_cents:
-            print(
-                f"{timestamp()}  [REPRICE] quote {self.active_order.price_cents}¢ → {target_price_cents}¢"
-            )
-            self.active_order = MockOrder(
-                price_cents=target_price_cents,
-                remaining_contracts=self.cfg.lot_contracts,
-                side=self.cfg.side,
-                expires_at=now + timedelta(seconds=self.cfg.quote_ttl_seconds),
-            )
-            print(
-                f"{timestamp()}  [POST] {self.cfg.ticker} {self.cfg.side.upper()} "
-                f"{self.cfg.lot_contracts} @ {target_price_cents}¢ (post_only)"
-            )
-
-    def on_trade(self, trade_payload: Dict[str, Any]) -> None:
-        market_ticker = trade_payload.get("market_ticker")
-        if market_ticker != self.cfg.ticker:
-            return
-
-        yes_price_cents = trade_payload.get("yes_price")
-        no_price_cents = trade_payload.get("no_price")
-        contracts = int(trade_payload.get("count", 0))
-        taker_side = trade_payload.get("taker_side")
-
-        print(
-            f"{timestamp()}  [TRADE] {market_ticker} taker={taker_side} "
-            f"yes={yes_price_cents}¢ no={no_price_cents}¢ size={contracts}"
-        )
-
-        if not self.active_order or contracts <= 0:
-            self.on_orderbook(self._cached_orderbook)
-            return
-
-        filled_contracts = 0
-        if self.cfg.side == "yes" and yes_price_cents == self.active_order.price_cents:
-            filled_contracts = min(contracts, self.active_order.remaining_contracts)
-            self.position_contracts += filled_contracts
-        elif self.cfg.side == "no" and no_price_cents == self.active_order.price_cents:
-            filled_contracts = min(contracts, self.active_order.remaining_contracts)
-            self.position_contracts -= filled_contracts
-
-        if filled_contracts > 0:
-            self.active_order.remaining_contracts -= filled_contracts
-            print(
-                f"{timestamp()}  [FILL] {self.cfg.side.upper()} {filled_contracts} @ "
-                f"{self.active_order.price_cents}¢ -> pos={self.position_contracts}"
-            )
-            if self.active_order.remaining_contracts <= 0:
-                self.active_order = None
-            if not self._inventory_ok():
-                print(
-                    f"{timestamp()}  [CAP] inventory limit reached (pos={self.position_contracts}); pulling quotes"
-                )
-                self.active_order = None
-                print(
-                    f"{timestamp()}  [REDUCE-ONLY] would send IOC reduce-only for {self.cfg.side.upper()} "
-                    f"{min(self.cfg.reduce_only_step_contracts, abs(self.position_contracts))} contracts"
-                )
-
-        self.on_orderbook(self._cached_orderbook)
-
-
 class MarketMakingListener:
-    """Market making bot that listens to WebSocket streams for a specific ticker."""
+    """Listens to Kalshi websockets and drives a strategy engine (with auto-reconnect)."""
 
-    def __init__(self, ticker: str, with_private: bool = False, strategy_cfg: Optional[StrategyConfig] = None):
-        """Initialize the market making listener."""
+    def __init__(
+        self,
+        ticker: str,
+        with_private: bool,
+        strategy_cfg: StrategyConfig,
+        client_cfg: Config,
+        *,
+        ws_client: Optional[KalshiWebSocketClient] = None,
+        api_client: Optional[KalshiAPIClient] = None,
+    ) -> None:
+        # Basic instance attributes and service clients.
         self.ticker = ticker
         self.with_private = with_private
-        self.config = Config()
-        self.ws_client = KalshiWebSocketClient(self.config)
-        self.api_client = KalshiAPIClient(self.config)
-        self.running = False
-
-        # Market data storage
+        self.config = client_cfg
+        self.ws_client = ws_client or KalshiWebSocketClient(self.config)
+        self.api_client = api_client or KalshiAPIClient(self.config)
         self.orderbook_tracker = OrderBookTracker()
-        self.current_orderbook: Dict[str, Dict[int, int]] = {}
+        self.engine = StrategyEngine(strategy_cfg, order_executor=self.api_client)
+
         self.recent_trades: list[dict[str, Any]] = []
-        self.current_positions: dict[str, dict[str, Any]] = {}
+        self.recent_positions: dict[str, dict[str, Any]] = {}
         self.recent_fills: list[dict[str, Any]] = []
 
-        self.strategy = MockMarketMaker(strategy_cfg or StrategyConfig(ticker=ticker))
-
-        logger.info(f"Initialized MarketMakingListener for ticker: {ticker}")
-        logger.info(f"Private mode: {with_private}")
-
-    async def start(self):
-        """Start the market making listener."""
-        try:
-            self.running = True
-            logger.info(f"Starting market making listener for {self.ticker}")
-
-            # Connect to WebSocket
-            await self.ws_client.connect()
-
-            # Subscribe to public market data
-            await self._subscribe_public_data()
-
-            # Subscribe to private data if requested
-            if self.with_private:
-                await self._subscribe_private_data()
-
-            # Start listening for messages
-            await self._listen_for_messages()
-
-        except Exception as e:
-            logger.error(f"Error starting market making listener: {e}")
-            raise
-        finally:
-            await self.stop()
-
-    async def stop(self):
-        """Stop the market making listener."""
-        self.running = False
-        await self.ws_client.disconnect()
-        logger.info("Market making listener stopped")
-
-    async def _subscribe_public_data(self):
-        """Subscribe to public market data streams."""
-        logger.info(f"Subscribing to public data for {self.ticker}")
-
-        # Subscribe to orderbook updates
+        # Register subscriptions so reconnect logic inside the client resends automatically.
         self.ws_client.subscribe_orderbook_updates([self.ticker])
-
-        # Subscribe to public trades
         self.ws_client.subscribe_public_trades([self.ticker])
-
-        # Subscribe to ticker updates
         self.ws_client.subscribe_market_ticker([self.ticker])
+        if self.with_private:
+            self.ws_client.subscribe_fills(self._on_fill)
+            self.ws_client.subscribe_market_positions(self._on_market_position)
 
-        logger.info(f"Subscribed to public data streams for {self.ticker}")
-
-    async def _subscribe_private_data(self):
-        """Subscribe to private/authenticated data streams."""
-        logger.info("Subscribing to private data streams")
-
-        # Subscribe to fills (trade confirmations)
-        self.ws_client.subscribe_fills(self._on_fill)
-
-        # Subscribe to market positions
-        self.ws_client.subscribe_market_positions(self._on_market_position)
-
-        logger.info("Subscribed to private data streams")
-
-    async def _listen_for_messages(self):
-        """Listen for WebSocket messages and process them."""
-        logger.info("Starting message listener loop")
-
-        while self.running:
+    async def run(self) -> None:
+        """Run the WS client and continuously process messages with reconnect tolerance."""
+        backoff_seconds = 2
+        while True:
+            client_task: Optional[asyncio.Task] = None
             try:
-                # Get messages from the WebSocket client
-                message = self.ws_client.get_messages(timeout=1.0)
+                logger.info("[WS] launching client task for %s", self.ticker)
 
-                if message:
-                    await self._process_message(message)
+                async def client_runner() -> None:
+                    await self.ws_client.start()
 
-                # Small delay to prevent busy waiting
-                await asyncio.sleep(0.01)
+                client_task = asyncio.create_task(client_runner())
 
-            except Exception as e:
-                logger.error(f"Error in message listener: {e}")
-                await asyncio.sleep(1)
+                # Give the client a moment to fully establish the websocket connection.
+                while not self.ws_client.running and not client_task.done():
+                    await asyncio.sleep(0.1)
 
-    async def _process_message(self, message: Dict[str, Any]):
-        """Process incoming WebSocket messages."""
-        try:
-            channel = message.get('channel')
-            message_type = message.get('message_type')
-            data = message.get('data', {})
+                if not self.ws_client.running:
+                    # Surface startup exceptions so callers can handle the root cause.
+                    if client_task.done() and client_task.exception():
+                        raise client_task.exception()
+                    # Otherwise, the client never reported as running; log and retry.
+                    logger.warning("[WS] client failed to start; retrying in %ss", backoff_seconds)
+                    await asyncio.sleep(backoff_seconds)
+                    continue
 
-            logger.debug(f"Processing {channel} message: {message_type}")
+                # At this point the client is healthy; start consuming events until it stops.
+                logger.info("[WS] connection established (ticker=%s)", self.ticker)
+                await self._event_loop(client_task)
 
-            # Route to appropriate handler based on channel
-            if channel == 'orderbook_delta':
-                await self._on_orderbook_update(data)
-            elif channel == 'trade':
-                await self._on_public_trade(data)
-            elif channel == 'ticker':
-                await self._on_ticker_update(data)
-            elif channel == 'fill':
-                await self._on_fill(data)
-            elif channel == 'market_positions':
-                await self._on_market_position(data)
-            else:
-                logger.debug(f"Unhandled message type: {channel}")
-
-        except Exception as e:
-            logger.error(f"Error processing message: {e}")
-
-    # Event Handlers
-
-    async def _on_orderbook_update(self, data: Dict[str, Any]):
-        """Handle orderbook update messages (snapshot and delta)."""
-        try:
-            try:
-                message_type = data['type']
-                msg_data = data['msg']
-                market_ticker = msg_data['market_ticker']
-            except KeyError as exc:
-                logger.error(f"Malformed orderbook message encountered: missing {exc!s}")
+            except asyncio.CancelledError:
                 raise
+            except Exception as exc:
+                logger.error("[WS] run-loop error: %s", exc, exc_info=True)
+                await asyncio.sleep(backoff_seconds)
+            finally:
+                self.ws_client.stop()
+                if client_task:
+                    with contextlib.suppress(Exception):
+                        await client_task
+                logger.info("[WS] client stopped for %s", self.ticker)
 
-            if market_ticker != self.ticker:
-                return
+    async def _event_loop(self, client_task: asyncio.Task) -> None:
+        # Main message pump: pull outbound messages while underlying client stays alive.
+        logger.info("Starting message loop")
+        while True:
+            if client_task.done():
+                if exc := client_task.exception():
+                    logger.error("[WS] client task ended with error: %s", exc, exc_info=True)
+                else:
+                    logger.warning("[WS] client task ended gracefully; reconnecting")
+                break
 
-            if message_type == 'orderbook_snapshot':
-                try:
-                    self.orderbook_tracker.apply_snapshot(msg_data)
-                except OrderBookError as exc:
-                    logger.error(str(exc))
-                    raise
+            message = self.ws_client.get_messages(timeout=1.0)
+            if message:
+                await self._dispatch(message)
+            await asyncio.sleep(0.01)
 
-                self.current_orderbook = self.orderbook_tracker.as_dict()
-                self.strategy.on_orderbook(self.orderbook_tracker)
-                self._log_orderbook_state(market_ticker, context="SNAPSHOT")
+    async def _dispatch(self, envelope: Dict[str, Any]) -> None:
+        channel = envelope.get("channel")
+        message_type = envelope.get("message_type")
+        payload = envelope.get("data", {})
 
-            elif message_type == 'orderbook_delta':
-                try:
-                    self.orderbook_tracker.apply_delta(msg_data)
-                except OrderBookError as exc:
-                    logger.error(str(exc))
-                    raise
+        if channel == "orderbook_delta":
+            # Ladder updates (snapshots or deltas) drive pricing decisions.
+            await self._on_orderbook(payload)
+        elif channel == "trade":
+            # Public trade prints update recent activity and inform signals.
+            await self._on_public_trade(payload)
+        elif channel == "ticker":
+            # Lightweight ticker pings are reserved for future analytics.
+            await self._on_ticker(payload)
+        elif channel == "fill":
+            # Private fills adjust our inventory view and strategy state.
+            await self._on_fill(payload)
+        elif channel == "market_positions":
+            # Position snapshots keep local exposure tracking in sync with Kalshi.
+            await self._on_market_position(payload)
+        else:
+            logger.debug("Unhandled channel %s (%s)", channel, message_type)
 
-                self.current_orderbook = self.orderbook_tracker.as_dict()
-                self.strategy.on_orderbook(self.orderbook_tracker)
-                self._log_orderbook_state(
-                    market_ticker,
-                    context=f"DELTA {msg_data['side'].upper()} {msg_data['price']}¢ {msg_data['delta']:+d}"
-                )
-
-        except Exception as e:
-            logger.error(f"Error handling orderbook update: {e}")
-
-    def _log_orderbook_state(self, market_ticker: str, context: str, levels: int = 5):
-        """Log the current orderbook state including top levels for both sides."""
-        try:
-            logger.info(f"[ORDERBOOK {context}] {market_ticker}")
-            self._log_top_levels('yes', levels)
-            self._log_top_levels('no', levels)
-        except Exception as e:
-            logger.error(f"Error logging orderbook state: {e}")
-
-    def _log_top_levels(self, side: str, max_levels: int):
-        """Log the top price levels for a given side of the orderbook."""
-        try:
-            levels = self.orderbook_tracker.top_levels(side, max_levels)
-        except ValueError as exc:
-            logger.error(str(exc))
+    async def _on_orderbook(self, payload: Dict[str, Any]) -> None:
+        # Decode the incoming ladder payload and feed it into the orderbook tracker.
+        # Step 1: unwrap the Kalshi envelope (`msg` vs top-level) and ensure we know which
+        # market it belongs to. Some events omit `market_ticker` at the top, so we fall back
+        # to the nested `orderbook` section if needed.
+        message_type = payload.get("type")
+        msg_body = payload.get("msg") or payload
+        market_ticker = msg_body.get("market_ticker")
+        if not market_ticker:
+            market_ticker = (msg_body.get("orderbook") or {}).get("market_ticker")
+        if market_ticker != self.ticker:
             return
 
-        if not levels:
-            logger.info(f"  {side.upper()} Orders: none")
+        # Step 2: normalize ladder fields so downstream tracker accepts consistent shape.
+        # Snapshots nest their ladder under `orderbook`, whereas deltas often flatten it.
+        # We coerce everything into a plain dict with `market_ticker`, `yes`, and `no` keys
+        # because the tracker expects those fields regardless of the upstream variant.
+        ladder_body = msg_body.get("orderbook") or msg_body
+        ladder_body = dict(ladder_body)
+        if "market_ticker" not in ladder_body and market_ticker:
+            ladder_body["market_ticker"] = market_ticker
+
+        levels_block = ladder_body.get("levels")
+        if isinstance(levels_block, dict):
+            ladder_body.setdefault("yes", levels_block.get("yes", []))
+            ladder_body.setdefault("no", levels_block.get("no", []))
+
+        ladder_body.setdefault("yes", [])
+        ladder_body.setdefault("no", [])
+
+        try:
+            if message_type == "orderbook_snapshot":
+                # Step 3a: snapshots reset every level, so we rebuild the tracker state
+                # wholesale using the provided ladder.
+                self.orderbook_tracker.apply_snapshot(ladder_body)
+                logger.info("[OB] snapshot applied: yes_levels=%d no_levels=%d", len(ladder_body["yes"]), len(ladder_body["no"]))
+            elif message_type == "orderbook_delta":
+                # Step 3b: deltas only contain changed levels; the tracker merges them
+                # into its existing state while maintaining order integrity.
+                self.orderbook_tracker.apply_delta(ladder_body)
+            else:
+                return
+        except OrderBookError as exc:
+            logger.error("Orderbook error: %s", exc)
             return
 
-        logger.info(f"  {side.upper()} Orders: {self.orderbook_tracker.level_count(side)} active levels")
-        for idx, (price_cents, size_contracts) in enumerate(levels, start=1):
-            logger.info(f"    Level {idx}: {price_cents}¢ x {size_contracts}")
+        # Step 4: once the tracker is current, push the data into the strategy engine.
+        # `refresh()` re-evaluates quoting logic and emits any order intents we should send.
+        self.engine.update_orderbook(self.orderbook_tracker)
+        orders_emitted = self.engine.refresh()
+        summary = self.engine.last_decision_summary()
+        if not orders_emitted:
+            logger.info("[OB] no quotes emitted; summary=%s", json.dumps(summary, default=str))
+        else:
+            logger.info("[OB] emitted %d intents", len(orders_emitted))
 
-    async def _on_public_trade(self, data: Dict[str, Any]):
-        """Handle public trade messages."""
-        try:
-            try:
-                msg_data = data['msg']
-                market_ticker = msg_data['market_ticker']
-            except KeyError as exc:
-                logger.error(f"Malformed trade message encountered: missing {exc!s}")
-                raise
+    async def _on_public_trade(self, payload: Dict[str, Any]) -> None:
+        # Record public tape updates and notify the strategy for flow-aware adjustments.
+        # Step 1: unwrap the payload to a consistent structure the engine understands.
+        body = payload.get("msg") or payload
+        market_ticker = body.get("market_ticker")
+        if market_ticker != self.ticker:
+            return
 
-            if market_ticker != self.ticker:
-                return
-
-            yes_price_cents = msg_data.get('yes_price')
-            no_price_cents = msg_data.get('no_price')
-            count_contracts = msg_data.get('count', 0)
-            taker_side = msg_data.get('taker_side', 'unknown')
-            ts_ms = msg_data.get('ts')
-
-            trade_info = {
-                'timestamp': datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc) if ts_ms else datetime.now(timezone.utc),
-                'market_ticker': market_ticker,
-                'yes_price_cents': yes_price_cents,
-                'no_price_cents': no_price_cents,
-                'count_contracts': count_contracts,
-                'taker_side': taker_side
+        # Step 2: capture the trade in a rolling buffer (for logs, debugging dashboards,
+        # or health checks). We cap the list to avoid unbounded growth.
+        self.recent_trades.append(
+            {
+                "timestamp": datetime.now(timezone.utc),
+                "payload": body,
             }
+        )
+        if len(self.recent_trades) > 100:
+            self.recent_trades.pop(0)
 
-            self.recent_trades.append(trade_info)
-            if len(self.recent_trades) > 100:
-                self.recent_trades.pop(0)
+        # Step 3: inform the strategy so it can react to recent flow (e.g., momentum
+        # signals, inventory throttling, price anchoring).
+        self.engine.on_public_trade(body)
 
-            logger.info(
-                f"[TRADE] {market_ticker} | {taker_side.upper()} | "
-                f"YES: {self._format_price(yes_price_cents)} | "
-                f"NO: {self._format_price(no_price_cents)} | "
-                f"Size: {count_contracts}"
-            )
+    async def _on_ticker(self, payload: Dict[str, Any]) -> None:
+        # Placeholder for ticker stream—currently ignored but reserved for analytics hooks.
+        # We still normalize the shape so future logic can plug in with minimal changes.
+        body = payload.get("msg") or payload
+        market_ticker = body.get("market_ticker")
+        if market_ticker != self.ticker:
+            return
+        # Reserved for future analytics
+        return
 
-            self.strategy.on_trade(msg_data)
+    async def _on_fill(self, payload: Dict[str, Any]) -> None:
+        # Track private fills and push them to the strategy so inventory stays accurate.
+        # Step 1: normalize the message because fills can arrive as bare payloads or nested.
+        body = payload.get("msg") or payload
+        market_ticker = body.get("market_ticker")
+        if market_ticker != self.ticker:
+            return
 
-        except Exception as e:
-            logger.error(f"Error handling public trade: {e}")
-
-    async def _on_ticker_update(self, data: Dict[str, Any]):
-        """Handle ticker update messages."""
-        try:
-            try:
-                msg_data = data['msg']
-                market_ticker = msg_data['market_ticker']
-            except KeyError as exc:
-                logger.error(f"Malformed ticker message encountered: missing {exc!s}")
-                raise
-
-            if market_ticker != self.ticker:
-                return
-
-            bid_cents = msg_data.get('bid') or msg_data.get('yes_bid')
-            ask_cents = msg_data.get('ask') or msg_data.get('yes_ask')
-            last_price_cents = msg_data.get('price') or msg_data.get('last_price')
-            volume_contracts = msg_data.get('volume', 0)
-
-            logger.info(
-                f"[TICKER] {market_ticker} | "
-                f"Bid: {self._format_price(bid_cents)} | "
-                f"Ask: {self._format_price(ask_cents)} | "
-                f"Last: {self._format_price(last_price_cents)} | "
-                f"Volume: {volume_contracts}"
-            )
-
-        except Exception as e:
-            logger.error(f"Error handling ticker update: {e}")
-
-    async def _on_fill(self, data: Dict[str, Any]):
-        """Handle fill (trade confirmation) messages."""
-        try:
-            market_ticker = data.get('market_ticker', '')
-            side = data.get('side', 'unknown')
-            count_contracts = data.get('count', 0)
-
-            price_dollars = None
-            if 'price_dollars' in data:
-                price_dollars = float(data['price_dollars'])
-            elif 'price_cc' in data:
-                price_dollars = float(data['price_cc']) / 10000.0
-            elif 'price' in data:
-                price_dollars = float(data['price']) / 100.0
-
-            fee_dollars = data.get('fee_dollars', 0)
-            rebate_dollars = data.get('rebate_dollars', 0)
-
-            fill_info = {
-                'timestamp': datetime.now(timezone.utcnow().tzinfo or timezone.utc),
-                'market_ticker': market_ticker,
-                'side': side,
-                'count_contracts': count_contracts,
-                'price_dollars': price_dollars,
-                'fee_dollars': fee_dollars,
-                'rebate_dollars': rebate_dollars
+        # Step 2: maintain a short history of fills for observability/debugging. Like
+        # trades, this is bounded to keep memory usage predictable.
+        self.recent_fills.append(
+            {
+                "timestamp": datetime.now(timezone.utc),
+                "payload": body,
             }
+        )
+        if len(self.recent_fills) > 50:
+            self.recent_fills.pop(0)
 
-            self.recent_fills.append(fill_info)
-            if len(self.recent_fills) > 50:
-                self.recent_fills.pop(0)
+        # Step 3: hand the fill to the strategy so it can reconcile position, PnL, and
+        # cancel/replace logic for outstanding quotes.
+        self.engine.on_private_fill(body)
 
-            if price_dollars is not None:
-                logger.info(
-                    f"[FILL] {market_ticker} | {side.upper()} {count_contracts} @ ${price_dollars:.4f} | "
-                    f"Fee: ${fee_dollars:.4f} | Rebate: ${rebate_dollars:.4f}"
-                )
-            else:
-                logger.info(
-                    f"[FILL] {market_ticker} | {side.upper()} {count_contracts} | "
-                    f"Fee: ${fee_dollars:.4f} | Rebate: ${rebate_dollars:.4f}"
-                )
+    async def _on_market_position(self, payload: Dict[str, Any]) -> None:
+        # Surface account-level exposure updates emitted by Kalshi.
+        # Step 1: normalize and verify the snapshot references a market.
+        body = payload.get("msg") or payload
+        market_ticker = body.get("market_ticker")
+        if not market_ticker:
+            return
 
-        except Exception as e:
-            logger.error(f"Error handling fill: {e}")
+        # Step 2: convert exchange units (contracts and centi-cents) into friendlier
+        # representations for logs and dashboards.
+        position_contracts = int(body.get("position", 0) or 0)
+        exposure_centi_cents = body.get("position_cost") or body.get("market_exposure_cc")
+        exposure_dollars = (
+            exposure_centi_cents / 10000.0 if isinstance(exposure_centi_cents, (int, float)) else None
+        )
 
-    async def _on_market_position(self, data: Dict[str, Any]):
-        """Handle market position messages."""
-        try:
-            market_ticker = data.get('market_ticker', '')
-            position_contracts = data.get('position', 0)
-
-            exposure_centi_cents = data.get('market_exposure_cc', 0)
-            exposure_dollars = (
-                exposure_centi_cents / 10000.0 if isinstance(exposure_centi_cents, (int, float)) else None
-            )
-
-            self.current_positions[market_ticker] = {
-                'position_contracts': position_contracts,
-                'exposure_dollars': exposure_dollars,
-                'timestamp': datetime.now(timezone.utcnow().tzinfo or timezone.utc)
-            }
-
-            if exposure_dollars is not None:
-                logger.info(
-                    f"[POSITION] {market_ticker} | Position: {position_contracts} | Exposure: ${exposure_dollars:.4f}"
-                )
-            else:
-                logger.info(f"[POSITION] {market_ticker} | Position: {position_contracts}")
-
-            self.strategy.position_contracts = position_contracts
-        except Exception as e:
-            logger.error(f"Error handling market position: {e}")
-
-    def _format_price(self, price_cents: Optional[int]) -> str:
-        if price_cents is None:
-            return "—"
-        return f"{price_cents}¢"
-
-    def get_market_summary(self) -> Dict[str, Any]:
-        return {
-            'ticker': self.ticker,
-            'current_orderbook': self.current_orderbook,
-            'recent_trades_count': len(self.recent_trades),
-            'recent_fills_count': len(self.recent_fills),
-            'current_positions': self.current_positions,
-            'timestamp': datetime.now(timezone.utcnow().tzinfo or timezone.utc)
+        self.recent_positions[market_ticker] = {
+            "position_contracts": position_contracts,
+            "exposure_dollars": exposure_dollars,
+            "timestamp": datetime.now(timezone.utc),
         }
 
+        if market_ticker == self.ticker:
+            # Step 3: if this is the actively traded market, sync the engine's view so
+            # it enforces inventory limits and possibly refreshes outstanding quotes.
+            self.engine.on_position_update(position_contracts)
+            self.engine.refresh()
 
-async def run_market_making_listener(ticker: str, with_private: bool, strategy_cfg: StrategyConfig):
-    listener = MarketMakingListener(ticker, with_private, strategy_cfg)
 
+async def run_listener(ticker: str, with_private: bool, strategy_cfg: StrategyConfig, client_cfg: Config) -> None:
+    listener = MarketMakingListener(ticker, with_private, strategy_cfg, client_cfg)
     try:
-        await listener.start()
-    except KeyboardInterrupt:  # type: ignore[name-defined]
-        logger.info("Received interrupt signal, shutting down...")
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        await listener.run()
+    except KeyboardInterrupt:
+        logger.info("Interrupted, gathering cleanup cancels")
+        cancels = listener.engine.cancel_all_orders()
+        for intent in cancels:
+            logger.info("[CLEANUP] would POST /portfolio/cancel for %s", intent.client_order_id)
+    except Exception as exc:
+        logger.error("Listener error: %s", exc, exc_info=True)
+        raise
     finally:
-        await listener.stop()
+        await listener.ws_client.disconnect()
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Kalshi Market Making WebSocket Listener")
-    parser.add_argument("--ticker", required=True, help="Market ticker to subscribe to (e.g., KXEPSTEINLIST-26-HKIS)")
-    parser.add_argument("--with-private", action="store_true", help="Subscribe to private streams (requires auth)")
-    parser.add_argument("--side", choices=["yes", "no"], default="yes", help="Which leg to quote")
-    parser.add_argument("--lot", type=int, default=5, help="Contracts per quote")
-    parser.add_argument("--min-spread", type=int, default=3, help="Minimum spread (cents) required to quote")
-    parser.add_argument("--queue-big-thresh", type=int, default=400, help="Queue size (contracts) considered large")
-    parser.add_argument("--cancel-move-ticks", type=int, default=2, help="Reprice when mid moves by this many ticks")
-    parser.add_argument("--max-inventory", type=int, default=100, help="Inventory cap in contracts")
-    parser.add_argument("--quote-ttl-sec", type=int, default=6, help="Local quote refresh interval (seconds)")
-    parser.add_argument("--reduce-only-step", type=int, default=10, help="Reduce-only size when over inventory cap")
-    parser.add_argument("--improve-if-last", action="store_true", default=True, help="Improve by 1 tick when tailing queue")
-    parser.add_argument("--no-improve-if-last", dest="improve_if_last", action="store_false", help="Disable improvement")
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Kalshi strategy-grouped mock maker")
+    parser.add_argument("--ticker", required=True, help="Market ticker (e.g., KXGDP-25Q4)")
+    parser.add_argument("--with-private", action="store_true", help="Subscribe to fills/positions (requires auth)")
+    parser.add_argument("--min-spread", type=int, default=3, help="Minimum spread (cents) per leg")
+    parser.add_argument("--bid-size", type=int, default=5, help="Contracts per entry bid (per leg)")
+    parser.add_argument("--exit-size", type=int, default=5, help="Contracts per exit ask")
+    parser.add_argument("--sum-cushion", type=int, default=3, help="Guard so bid_yes+bid_no ≤ 100 - cushion")
+    parser.add_argument("--take-profit", type=int, default=2, help="Ticks above entry for exit asks")
+    parser.add_argument("--quote-ttl", type=int, default=6, help="Seconds before entry bids refresh")
+    parser.add_argument("--exit-ttl", type=int, default=20, help="Seconds before exit asks expire")
+    parser.add_argument("--max-inventory", type=int, default=100, help="Net YES inventory cap")
+    parser.add_argument("--reduce-step", type=int, default=10, help="Reduce-only suggestion size when at cap")
+    parser.add_argument("--touch-cap", type=int, default=40, help="Contracts cap for TouchMaker strategy")
+    parser.add_argument("--depth-cap", type=int, default=120, help="Contracts cap for DepthLadder strategy")
+    parser.add_argument("--band-cap", type=int, default=80, help="Contracts cap for BandReplenish strategy")
+    parser.add_argument("--depth-levels", type=int, default=3, help="Number of ladder levels for depth strategy")
+    parser.add_argument("--depth-step", type=int, default=2, help="Tick step between depth levels")
+    parser.add_argument("--band-rungs", type=int, default=2, help="# of rungs in band strategy")
+    parser.add_argument("--band-width", type=int, default=4, help="Half-width (ticks) for band replenishment")
+    parser.add_argument("--no-touch", action="store_true", help="Disable TouchMaker strategy")
+    parser.add_argument("--no-depth", action="store_true", help="Disable DepthLadder strategy")
+    parser.add_argument("--no-band", action="store_true", help="Disable BandReplenish strategy")
+    parser.add_argument("--demo-mode", action="store_true", help="Use demo mode")
+    return parser.parse_args(argv)
 
-    args = parser.parse_args()
 
-    logger.info(f"Starting market making listener for ticker: {args.ticker}")
-    logger.info(f"Private mode: {args.with_private}")
-
-    if args.with_private:
-        config = Config()
-        if not config.KALSHI_API_KEY_ID or not config.KALSHI_PRIVATE_KEY_PATH:
-            logger.error("Private mode requested but KALSHI_API_KEY_ID or KALSHI_PRIVATE_KEY_PATH not set")
-            logger.error("Set these environment variables or remove --with-private flag")
-            return 1
-
-    strategy_cfg = StrategyConfig(
+def build_strategy_config(args: argparse.Namespace) -> StrategyConfig:
+    return StrategyConfig(
         ticker=args.ticker,
-        side=args.side,
-        lot_contracts=args.lot,
         min_spread_cents=args.min_spread,
-        improve_if_last=args.improve_if_last,
-        queue_big_thresh_contracts=args.queue_big_thresh,
-        cancel_move_ticks=args.cancel_move_ticks,
+        bid_size_contracts=args.bid_size,
+        exit_size_contracts=args.exit_size,
+        sum_cushion_ticks=args.sum_cushion,
+        take_profit_ticks=args.take_profit,
+        quote_ttl_seconds=args.quote_ttl,
+        exit_ttl_seconds=args.exit_ttl,
         max_inventory_contracts=args.max_inventory,
-        quote_ttl_seconds=args.quote_ttl_sec,
-        reduce_only_step_contracts=args.reduce_only_step,
+        reduce_only_step_contracts=args.reduce_step,
+        touch_enabled=not args.no_touch,
+        touch_contract_limit=args.touch_cap,
+        depth_enabled=not args.no_depth,
+        depth_contract_limit=args.depth_cap,
+        depth_levels=args.depth_levels,
+        depth_step_ticks=args.depth_step,
+        band_enabled=not args.no_band,
+        band_contract_limit=args.band_cap,
+        band_half_width_ticks=args.band_width,
+        band_rungs=args.band_rungs,
     )
 
-    try:
-        asyncio.run(run_market_making_listener(args.ticker, args.with_private, strategy_cfg))
-    except Exception as e:
-        logger.error(f"Failed to start market making listener: {e}")
-        return 1
 
+def main(argv: Optional[list[str]] = None) -> int:
+    args = parse_args(argv)
+
+    logger.info("Starting strategy-grouped mock maker for ticker=%s", args.ticker)
+    if args.with_private:
+        cfg = Config()
+        cfg.KALSHI_DEMO_MODE = args.demo_mode
+        if not cfg.KALSHI_API_KEY_ID or not cfg.KALSHI_PRIVATE_KEY_PATH:
+            logger.error("Private mode requested but Kalshi credentials are missing")
+            return 1
+
+    strategy_cfg = build_strategy_config(args)
+
+    try:
+        asyncio.run(run_listener(args.ticker, args.with_private, strategy_cfg, cfg))
+    except Exception as exc:  # pragma: no cover
+        logger.error("Fatal error: %s", exc)
+        return 1
     return 0
 
 
 if __name__ == "__main__":
-    # noqa: PLR0912 (argparse configuration is intentionally verbose)
     sys.exit(main())

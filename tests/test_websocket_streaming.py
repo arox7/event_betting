@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any
 
 from config import Config, setup_logging
-from kalshi_websocket import KalshiWebSocketClient
+from kalshi.websocket import KalshiWebSocketClient
 
 # Configure logging with centralized setup
 setup_logging(level=logging.INFO, include_filename=True)
