@@ -358,6 +358,7 @@ def build_strategy_config(args: argparse.Namespace) -> StrategyConfig:
         band_contract_limit=args.band_cap,
         band_half_width_ticks=args.band_width,
         band_rungs=args.band_rungs,
+        live_mode=True,
     )
 
 

@@ -12,6 +12,18 @@ from typing import Any, Dict, List, Optional, Tuple
 from orderbook_tracker import OrderBookTracker
 
 logger = logging.getLogger(__name__)
+UUID4_HEX_LEN = 36
+
+
+class StrategyExecutionError(RuntimeError):
+    """Raised when a live API request fails during strategy execution."""
+
+    def __init__(self, method: str, path: str, status_code: int, body: Optional[str]) -> None:
+        super().__init__(f"{method} {path} failed: status={status_code} body={body}")
+        self.method = method
+        self.path = path
+        self.status_code = status_code
+        self.body = body or ""
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +84,7 @@ class OrderGroupState:
     filled_contracts: int = 0
     created: bool = False
     pending: Dict[str, OrderIntent] = field(default_factory=dict)
+    group_id: Optional[str] = None
 
     def remaining(self) -> int:
         return max(0, self.contracts_limit - self.filled_contracts)
@@ -91,6 +104,7 @@ class StrategyConfig:
     """High level knobs for all strategies."""
 
     ticker: str
+    live_mode: bool = False
     min_spread_cents: int = 3
     bid_size_contracts: int = 5
     exit_size_contracts: int = 5
@@ -119,6 +133,7 @@ class StrategyConfig:
     queue_big_threshold: int = 400
     exit_ladder_threshold: int = 30
     improve_if_last: bool = True
+    live_mode: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +172,28 @@ class StrategyEngine:
         self.recent_taker_yes: Optional[str] = None
         self.recent_taker_no: Optional[str] = None
         self._last_summary: Dict[str, Any] = {}
+
+    # ------------------------------------------------------------------
+    # Execution helpers (single place to honor live_mode)
+    # ------------------------------------------------------------------
+
+    def _should_execute(self) -> bool:
+        return bool(self.cfg.live_mode and self.order_executor)
+
+    def _execute_request(self, method: str, path: str, json_data: Dict[str, Any]):
+        if not self._should_execute():
+            logger.info("--> Would %s %s with payload:\n%s", method, path, json.dumps(json_data, indent=2))
+            return None
+        try:
+            response = self.order_executor.http_client.make_authenticated_request(method, path, json_data=json_data)
+        except Exception as exc:
+            logger.error("[LIVE %s] failed: %s", method, exc, exc_info=True)
+            raise StrategyExecutionError(method, path, 0, str(exc))
+
+        logger.info("[LIVE %s] status=%s body=%s", method, response.status_code, getattr(response, "text", ""))
+        if getattr(response, "status_code", 0) >= 400:
+            raise StrategyExecutionError(method, path, response.status_code, getattr(response, "text", ""))
+        return response
 
     # ------------------------------------------------------------------
     # Public hooks
@@ -295,16 +332,11 @@ class StrategyEngine:
                     client_order_id=client_id,
                 )
                 cleanup_intents.append(intent)
-                if self.order_executor:
-                    try:
-                        resp = self.order_executor.http_client.make_authenticated_request(
-                            "POST",
-                            "/portfolio/cancel_order",
-                            json_data={"ticker": intent.ticker, "client_order_id": intent.client_order_id},
-                        )
-                        logger.info("[LIVE CANCEL] %s status=%s", client_id, resp.status_code)
-                    except Exception as exc:
-                        logger.error("[LIVE CANCEL] %s failed: %s", client_id, exc, exc_info=True)
+                self._execute_request(
+                    "POST",
+                    "/portfolio/cancel_order",
+                    json_data={"ticker": intent.ticker, "client_order_id": intent.client_order_id},
+                )
                 self.groups[strategy].remove_intent(client_id)
             records.clear()
 
@@ -325,16 +357,11 @@ class StrategyEngine:
                     client_order_id=client_id,
                 )
                 cleanup_intents.append(intent)
-                if self.order_executor:
-                    try:
-                        resp = self.order_executor.http_client.make_authenticated_request(
-                            "POST",
-                            "/portfolio/cancel_order",
-                            json_data={"ticker": intent.ticker, "client_order_id": intent.client_order_id},
-                        )
-                        logger.info("[LIVE CANCEL] %s status=%s", client_id, resp.status_code)
-                    except Exception as exc:
-                        logger.error("[LIVE CANCEL] %s failed: %s", client_id, exc, exc_info=True)
+                self._execute_request(
+                    "POST",
+                    "/portfolio/cancel_order",
+                    json_data={"ticker": intent.ticker, "client_order_id": intent.client_order_id},
+                )
                 self.groups["exit"].remove_intent(client_id)
             exits.clear()
 
@@ -758,8 +785,22 @@ class StrategyEngine:
         if not group.created:
             # First order for this group—we would normally create the order-group on Kalshi.
             payload = {"contracts_limit": group.contracts_limit}
-            logger.info(f"{_now_str()}  [ORDER GROUP] Would POST /portfolio/order_groups/create")
-            logger.info("%s", json.dumps(payload, indent=2))
+            logger.info(f"{_now_str()}  [ORDER GROUP] create")
+            resp = self._execute_request("POST", "/portfolio/order_groups/create", json_data=payload)
+            # Parse order_group_id if provided (live API typically returns it). For test fakes
+            # that return no JSON, skip assignment and proceed.
+            if resp:
+                try:
+                    body = resp.json() if hasattr(resp, "json") else json.loads(getattr(resp, "text", "{}"))
+                    group_id = (body or {}).get("order_group_id")
+                    if isinstance(group_id, str):
+                        group_id = group_id.strip()
+                    if group_id and isinstance(group_id, str) and len(group_id) == UUID4_HEX_LEN and group_id.count("-") == 4:
+                        group.group_id = group_id
+                except Exception:
+                    # Best-effort: absence or parse failure isn't fatal here because non-UUID
+                    # IDs are acceptable in dry-run/tests; live failures already raised earlier.
+                    pass
             group.created = True
 
         group.register_intent(intent)
@@ -769,16 +810,10 @@ class StrategyEngine:
             f"{intent.count} @ {intent.price_cents}¢ (group={group.name})"
         )
         payload = intent.to_api_payload()
-        logger.info("--> Would POST /portfolio/orders with payload:\n%s", json.dumps(payload, indent=2))
-        if self.order_executor and intent.action in {"buy", "sell"}:
-            try:
-                # When running live, fire the authenticated order request through the executor.
-                response = self.order_executor.http_client.make_authenticated_request(
-                    "POST", "/portfolio/orders", json_data=payload
-                )
-                logger.info("[LIVE ORDER] status=%s body=%s", response.status_code, response.text)
-            except Exception as exc:
-                logger.error("[LIVE ORDER] failed: %s", exc, exc_info=True)
+        # Always override order_group_id with the live group id if present
+        if group.group_id:
+            payload["order_group_id"] = group.group_id
+        resp = self._execute_request("POST", "/portfolio/orders", json_data=payload)
 
     # ------------------------------------------------------------------
     # Convenience properties
