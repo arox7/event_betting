@@ -332,7 +332,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--no-touch", action="store_true", help="Disable TouchMaker strategy")
     parser.add_argument("--no-depth", action="store_true", help="Disable DepthLadder strategy")
     parser.add_argument("--no-band", action="store_true", help="Disable BandReplenish strategy")
-    parser.add_argument("--demo-mode", action="store_true", help="Use demo mode")
+    parser.add_argument("--live-mode", action="store_true", help="Use live mode")
+    parser.add_argument("--demo-mode", action="store_true", help="Use demo environment mode")
     return parser.parse_args(argv)
 
 
@@ -358,7 +359,7 @@ def build_strategy_config(args: argparse.Namespace) -> StrategyConfig:
         band_contract_limit=args.band_cap,
         band_half_width_ticks=args.band_width,
         band_rungs=args.band_rungs,
-        live_mode=True,
+        live_mode=args.live_mode,
     )
 
 

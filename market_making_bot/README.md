@@ -28,6 +28,8 @@ conda activate event_betting
 python market_making_bot/mm_ws_listener.py --ticker KXKIMMELAPOLOGY-25SEP29 --with-private
 ```
 
+To actually place orders, add `--live-mode`.
+
 ### Handy CLI Flags
 
 | Flag | Description | Default |
@@ -35,6 +37,7 @@ python market_making_bot/mm_ws_listener.py --ticker KXKIMMELAPOLOGY-25SEP29 --wi
 | `--ticker` | Kalshi market ticker (e.g., `KXKIMMELAPOLOGY-25SEP29`) | — |
 | `--with-private` | Subscribe to authenticated `fills` + `market_positions` streams | off |
 | `--demo-mode` | Use Kalshi demo environment (recommended for first runs) | off |
+| `--live-mode` | Execute real create/cancel orders via API (otherwise dry-run only) | off |
 | `--min-spread` | Minimum spread (per leg) required before bidding | `3` |
 | `--bid-size` | Contracts per passive bid on each leg | `5` |
 | `--exit-size` | Contracts per exit ask after fills | `5` |
@@ -118,6 +121,7 @@ python market_making_bot/mm_ws_listener.py \
 
 Notes:
 - Orders created by TouchMaker and Exit Maker are post-only by design. There is no CLI toggle; this avoids crossing in thin markets.
+- `--live-mode` submits actual orders/cancels through the API; omit it for safe dry-run logging only.
 - `--with-private` is required to receive fills and positions; without it, inventory/exit behavior won’t function.
 - `--demo-mode` points to Kalshi’s demo cluster; remove it to target production once satisfied.
 
@@ -247,7 +251,7 @@ market_making_bot/
 
 ## Limitations & Next Steps
 
-- **No real orders**: The bot prints the actions it would take. To place actual orders, swap in Kalshi order-placement calls inside the strategy’s logging blocks.
+- **Real orders optional**: By default the bot runs in dry-run mode (logs intended actions). Add `--live-mode` to actually place/cancel orders; use `--demo-mode` to target demo first before production.
 - **No risk engine**: Inventory caps are static; more advanced risk measures (delta, margin, total cash) should be bolted on before going live.
 - **Single market**: Currently handles one ticker. Extend the tracker and strategy to juggle multiple markets if needed.
 

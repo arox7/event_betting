@@ -104,7 +104,6 @@ class StrategyConfig:
     """High level knobs for all strategies."""
 
     ticker: str
-    live_mode: bool = False
     min_spread_cents: int = 3
     bid_size_contracts: int = 5
     exit_size_contracts: int = 5
@@ -585,6 +584,13 @@ class StrategyEngine:
             if key not in targets:
                 leg = key.split(":")[0]
                 print(f"{_now_str()}  [CANCEL {strategy.upper()}] {leg.upper()} {size} @ {price}¢")
+                # Issue real cancel against the previously posted client order id
+                client_id = f"{strategy}-{key}"
+                self._execute_request(
+                    "POST",
+                    "/portfolio/cancel_order",
+                    json_data={"ticker": self.cfg.ticker, "client_order_id": client_id},
+                )
                 previous.pop(key, None)
                 group.remove_intent(f"{strategy}-{key}")
                 stats["cancels"].append({"leg": leg, "price": price, "size": size})
@@ -643,6 +649,13 @@ class StrategyEngine:
         for key, (price, size) in previous.items():
             leg = key.split(":")[0]
             print(f"{_now_str()}  [CANCEL {strategy.upper()}] {leg.upper()} {size} @ {price}¢{reason_suffix}")
+            # Send real cancel for the associated client order id
+            client_id = f"{strategy}-{key}"
+            self._execute_request(
+                "POST",
+                "/portfolio/cancel_order",
+                json_data={"ticker": self.cfg.ticker, "client_order_id": client_id},
+            )
             group.remove_intent(f"{strategy}-{key}")
         previous.clear()
 
@@ -663,6 +676,12 @@ class StrategyEngine:
             # Step 1: if we have no exposure on this leg, cancel anything still working.
             for kind, (price, size) in list(exits.items()):
                 print(f"{_now_str()}  [CANCEL EXIT] {leg.upper()} {size} @ {price}¢")
+                # Cancel the live exit order by its client id (kind)
+                self._execute_request(
+                    "POST",
+                    "/portfolio/cancel_order",
+                    json_data={"ticker": self.cfg.ticker, "client_order_id": kind},
+                )
                 self.groups["exit"].remove_intent(kind)
                 exits.pop(kind, None)
                 stats["cancelled"].append({"kind": kind, "price": price, "size": size})
@@ -686,6 +705,12 @@ class StrategyEngine:
             if kind not in keep_keys:
                 price, size = exits[kind]
                 print(f"{_now_str()}  [CANCEL EXIT] {leg.upper()} {size} @ {price}¢")
+                # Send cancel for obsolete exit orders
+                self._execute_request(
+                    "POST",
+                    "/portfolio/cancel_order",
+                    json_data={"ticker": self.cfg.ticker, "client_order_id": kind},
+                )
                 self.groups["exit"].remove_intent(kind)
                 exits.pop(kind, None)
                 stats["cancelled"].append({"kind": kind, "price": price, "size": size})

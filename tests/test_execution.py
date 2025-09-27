@@ -130,3 +130,58 @@ def test_live_mode_raises_on_error(monkeypatch, yes_no_book):
     with pytest.raises(StrategyExecutionError):
         engine.refresh()
 
+
+def test_reconcile_cancels_previous_entries_on_clear_live(yes_no_book):
+    cfg = StrategyConfig(
+        ticker="FAKE-CANCEL",
+        live_mode=True,
+        touch_enabled=True,
+        depth_enabled=False,
+        band_enabled=False,
+        bid_size_contracts=1,
+        exit_size_contracts=1,
+    )
+    executor = RecordingExecutor()
+    engine = StrategyEngine(cfg, order_executor=executor)
+
+    # Place initial touch entries on both legs
+    load_snapshot(engine, *yes_no_book)
+    engine.refresh()
+    assert engine.current_entries["touch"]
+
+    # Force a clear by providing an empty ladder (no quotes)
+    load_snapshot(engine, yes_levels=[], no_levels=[])
+    engine.refresh()
+
+    cancel_calls = [j for (_m, p, j) in executor.http_client.calls if p == "/portfolio/cancel_order"]
+    cancel_ids = {j.get("client_order_id") for j in cancel_calls}
+    # Expect cancels for both original touch client ids
+    assert {"touch-yes:touch", "touch-no:touch"}.issubset(cancel_ids)
+
+
+def test_exit_cancels_when_inventory_goes_flat_live(yes_no_book):
+    cfg = StrategyConfig(
+        ticker="FAKE-EXIT-CANCEL",
+        live_mode=True,
+        touch_enabled=False,
+        depth_enabled=False,
+        band_enabled=False,
+        bid_size_contracts=1,
+        exit_size_contracts=5,
+    )
+    executor = RecordingExecutor()
+    engine = StrategyEngine(cfg, order_executor=executor)
+
+    # With positive YES inventory, exit maker should place an exit order
+    engine.on_position_update(2)
+    load_snapshot(engine, *yes_no_book)
+    engine.refresh()
+
+    # Now inventory goes flat -> expect exit cancels to be sent
+    engine.on_position_update(0)
+    engine.refresh()
+
+    cancel_calls = [j for (_m, p, j) in executor.http_client.calls if p == "/portfolio/cancel_order"]
+    cancel_ids = {j.get("client_order_id") for j in cancel_calls}
+    assert "exit-yes" in cancel_ids
+
