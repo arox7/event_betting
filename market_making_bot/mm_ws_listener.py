@@ -27,7 +27,8 @@ from config import Config, setup_logging
 from kalshi.websocket import KalshiWebSocketClient
 from kalshi.client import KalshiAPIClient
 from orderbook_tracker import OrderBookTracker, OrderBookError
-from strategy import StrategyConfig, StrategyEngine
+from shared_config import StrategyConfig
+from strategy import StrategyEngine
 
 setup_logging(level=logging.INFO, include_filename=True)
 logger = logging.getLogger(__name__)
@@ -310,28 +311,16 @@ async def run_listener(ticker: str, with_private: bool, strategy_cfg: StrategyCo
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Kalshi strategy-grouped mock maker")
+    parser = argparse.ArgumentParser(description="Kalshi TouchMaker strategy")
     parser.add_argument("--ticker", required=True, help="Market ticker (e.g., KXGDP-25Q4)")
     parser.add_argument("--with-private", action="store_true", help="Subscribe to fills/positions (requires auth)")
     parser.add_argument("--min-spread", type=int, default=3, help="Minimum spread (cents) per leg")
     parser.add_argument("--bid-size", type=int, default=5, help="Contracts per entry bid (per leg)")
-    parser.add_argument("--exit-size", type=int, default=5, help="Contracts per exit ask")
     parser.add_argument("--sum-cushion", type=int, default=3, help="Guard so bid_yes+bid_no ≤ 100 - cushion")
-    parser.add_argument("--take-profit", type=int, default=2, help="Ticks above entry for exit asks")
     parser.add_argument("--quote-ttl", type=int, default=6, help="Seconds before entry bids refresh")
-    parser.add_argument("--exit-ttl", type=int, default=20, help="Seconds before exit asks expire")
     parser.add_argument("--max-inventory", type=int, default=100, help="Net YES inventory cap")
-    parser.add_argument("--reduce-step", type=int, default=10, help="Reduce-only suggestion size when at cap")
     parser.add_argument("--touch-cap", type=int, default=40, help="Contracts cap for TouchMaker strategy")
-    parser.add_argument("--depth-cap", type=int, default=120, help="Contracts cap for DepthLadder strategy")
-    parser.add_argument("--band-cap", type=int, default=80, help="Contracts cap for BandReplenish strategy")
-    parser.add_argument("--depth-levels", type=int, default=3, help="Number of ladder levels for depth strategy")
-    parser.add_argument("--depth-step", type=int, default=2, help="Tick step between depth levels")
-    parser.add_argument("--band-rungs", type=int, default=2, help="# of rungs in band strategy")
-    parser.add_argument("--band-width", type=int, default=4, help="Half-width (ticks) for band replenishment")
-    parser.add_argument("--no-touch", action="store_true", help="Disable TouchMaker strategy")
-    parser.add_argument("--no-depth", action="store_true", help="Disable DepthLadder strategy")
-    parser.add_argument("--no-band", action="store_true", help="Disable BandReplenish strategy")
+    parser.add_argument("--enable-touch", action="store_true", help="Enable TouchMaker strategy")
     parser.add_argument("--live-mode", action="store_true", help="Use live mode")
     parser.add_argument("--demo-mode", action="store_true", help="Use demo environment mode")
     return parser.parse_args(argv)
@@ -342,23 +331,11 @@ def build_strategy_config(args: argparse.Namespace) -> StrategyConfig:
         ticker=args.ticker,
         min_spread_cents=args.min_spread,
         bid_size_contracts=args.bid_size,
-        exit_size_contracts=args.exit_size,
         sum_cushion_ticks=args.sum_cushion,
-        take_profit_ticks=args.take_profit,
         quote_ttl_seconds=args.quote_ttl,
-        exit_ttl_seconds=args.exit_ttl,
         max_inventory_contracts=args.max_inventory,
-        reduce_only_step_contracts=args.reduce_step,
-        touch_enabled=not args.no_touch,
+        touch_enabled=args.enable_touch,
         touch_contract_limit=args.touch_cap,
-        depth_enabled=not args.no_depth,
-        depth_contract_limit=args.depth_cap,
-        depth_levels=args.depth_levels,
-        depth_step_ticks=args.depth_step,
-        band_enabled=not args.no_band,
-        band_contract_limit=args.band_cap,
-        band_half_width_ticks=args.band_width,
-        band_rungs=args.band_rungs,
         live_mode=args.live_mode,
     )
 

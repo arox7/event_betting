@@ -147,7 +147,9 @@ def test_reconcile_cancels_previous_entries_on_clear_live(yes_no_book):
     # Place initial touch entries on both legs
     load_snapshot(engine, *yes_no_book)
     engine.refresh()
-    assert engine.current_entries["touch"]
+    # Check that we have touch orders in live_orders
+    touch_orders = [o for o in engine.live_orders.values() if o.strategy == "touch"]
+    assert len(touch_orders) == 2  # Should have both YES and NO touch orders
 
     # Force a clear by providing an empty ladder (no quotes)
     load_snapshot(engine, yes_levels=[], no_levels=[])
@@ -163,25 +165,53 @@ def test_exit_cancels_when_inventory_goes_flat_live(yes_no_book):
     cfg = StrategyConfig(
         ticker="FAKE-EXIT-CANCEL",
         live_mode=True,
-        touch_enabled=False,
+        touch_enabled=True,  # Enable touch maker
         depth_enabled=False,
         band_enabled=False,
         bid_size_contracts=1,
         exit_size_contracts=5,
+        max_inventory_contracts=5,  # Set low inventory cap to test exit behavior
     )
     executor = RecordingExecutor()
     engine = StrategyEngine(cfg, order_executor=executor)
 
-    # With positive YES inventory, exit maker should place an exit order
-    engine.on_position_update(2)
+    # With positive YES inventory, TouchMaker should place NO orders (to exit YES position)
+    engine.on_position_update(2)  # Long YES position
     load_snapshot(engine, *yes_no_book)
     engine.refresh()
 
-    # Now inventory goes flat -> expect exit cancels to be sent
+    # TouchMaker should place both orders when below cap (position=2, max=5)
+    touch_orders = [o for o in engine.live_orders.values() if o.strategy == "touch"]
+    no_orders = [o for o in touch_orders if o.side == "no"]
+    yes_orders = [o for o in touch_orders if o.side == "yes"]
+    
+    # Should have both orders when below cap (TouchMaker bids both sides until cap)
+    assert len(no_orders) > 0  # Should have NO orders
+    assert len(yes_orders) > 0  # Should have YES orders (below cap)
+
+    # Test what happens when we hit the cap
+    engine.on_position_update(5)  # Hit the cap
+    engine.refresh()
+    
+    # Should only have NO orders (YES at cap, NO still allowed)
+    touch_orders_at_cap = [o for o in engine.live_orders.values() if o.strategy == "touch"]
+    yes_orders_at_cap = [o for o in touch_orders_at_cap if o.side == "yes"]
+    no_orders_at_cap = [o for o in touch_orders_at_cap if o.side == "no"]
+    
+    # Should have NO orders but no YES orders (YES at cap)
+    assert len(yes_orders_at_cap) == 0  # Should not have YES orders (at cap)
+    assert len(no_orders_at_cap) > 0   # Should have NO orders (not at cap)
+
+    # Now inventory goes flat -> should place both YES and NO orders again
     engine.on_position_update(0)
     engine.refresh()
 
-    cancel_calls = [j for (_m, p, j) in executor.http_client.calls if p == "/portfolio/cancel_order"]
-    cancel_ids = {j.get("client_order_id") for j in cancel_calls}
-    assert "exit-yes" in cancel_ids
+    # Should now have both YES and NO orders (neutral position)
+    touch_orders_after = [o for o in engine.live_orders.values() if o.strategy == "touch"]
+    yes_orders_after = [o for o in touch_orders_after if o.side == "yes"]
+    no_orders_after = [o for o in touch_orders_after if o.side == "no"]
+    
+    # Should have both orders when neutral
+    assert len(yes_orders_after) > 0
+    assert len(no_orders_after) > 0
 

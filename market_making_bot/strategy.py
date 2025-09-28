@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from orderbook_tracker import OrderBookTracker
+from touchmaker import TouchMaker
+from shared_config import StrategyConfig, OrderIntent, OrderGroupState, _now_str, clamp
 
 logger = logging.getLogger(__name__)
 UUID4_HEX_LEN = 36
@@ -31,108 +33,12 @@ class StrategyExecutionError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-def _now_str() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
-def clamp(value: int, lo: int, hi: int) -> int:
-    return max(lo, min(hi, value))
 
 
-@dataclass
-class OrderIntent:
-    """Representation of a Create Order request we *would* send."""
-
-    ticker: str
-    strategy: str
-    purpose: str  # e.g. "entry"/"exit"
-    action: str  # "buy"/"sell"
-    side: str  # "yes"/"no"
-    price_cents: int
-    count: int
-    post_only: bool
-    expiration_ts: Optional[int]
-    order_group_id: str
-    client_order_id: str
-    hedge_with: Optional[str] = None
-
-    def to_api_payload(self) -> Dict[str, Any]:
-        field = "yes_price" if self.side == "yes" else "no_price"
-        payload: Dict[str, Any] = {
-            "action": self.action,
-            "side": self.side,
-            "ticker": self.ticker,
-            field: self.price_cents,
-            "count": self.count,
-            "post_only": self.post_only,
-            "client_order_id": self.client_order_id,
-            "order_group_id": self.order_group_id,
-        }
-        if self.expiration_ts is not None:
-            payload["expiration_ts"] = self.expiration_ts
-        if self.hedge_with:
-            payload["hedge_with_client_order_id"] = self.hedge_with
-        return payload
 
 
-@dataclass
-class OrderGroupState:
-    """Tracks cap + pending orders for a strategy bucket."""
-
-    name: str
-    contracts_limit: int
-    filled_contracts: int = 0
-    created: bool = False
-    pending: Dict[str, OrderIntent] = field(default_factory=dict)
-    group_id: Optional[str] = None
-
-    def remaining(self) -> int:
-        return max(0, self.contracts_limit - self.filled_contracts)
-
-    def register_intent(self, intent: OrderIntent) -> None:
-        self.pending[intent.client_order_id] = intent
-
-    def remove_intent(self, client_order_id: str) -> None:
-        self.pending.pop(client_order_id, None)
-
-    def register_fill(self, count: int) -> None:
-        self.filled_contracts += count
-
-
-@dataclass
-class StrategyConfig:
-    """High level knobs for all strategies."""
-
-    ticker: str
-    min_spread_cents: int = 3
-    bid_size_contracts: int = 5
-    exit_size_contracts: int = 5
-    sum_cushion_ticks: int = 3
-    take_profit_ticks: int = 2
-    quote_ttl_seconds: int = 6
-    exit_ttl_seconds: int = 20
-    cancel_move_ticks: int = 2
-    max_inventory_contracts: int = 100
-    reduce_only_step_contracts: int = 10
-
-    touch_enabled: bool = True
-    touch_contract_limit: int = 40
-
-    depth_enabled: bool = True
-    depth_contract_limit: int = 120
-    depth_levels: int = 3
-    depth_step_ticks: int = 2
-
-    band_enabled: bool = True
-    band_contract_limit: int = 80
-    band_half_width_ticks: int = 4
-    band_rungs: int = 2
-
-    queue_small_threshold: int = 50
-    queue_big_threshold: int = 400
-    exit_ladder_threshold: int = 30
-    improve_if_last: bool = True
-    live_mode: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -148,22 +54,19 @@ class StrategyEngine:
         self.cfg = cfg
         self.order_executor = order_executor
         self.orderbook: Optional[OrderBookTracker] = None
+        
+        # Initialize strategy implementations
+        self.touchmaker = TouchMaker(cfg)
 
-        # Group state keeps per-strategy inventory caps and outstanding intents.
+        # Single source of truth for live orders
+        self.live_orders: Dict[str, OrderIntent] = {}
+        
+        # Group state for cap accounting
         self.groups: Dict[str, OrderGroupState] = {
             "touch": OrderGroupState("touch", cfg.touch_contract_limit),
             "depth": OrderGroupState("depth", cfg.depth_contract_limit),
             "band": OrderGroupState("band", cfg.band_contract_limit),
-            "exit": OrderGroupState("exit", cfg.max_inventory_contracts),
         }
-
-        # Track currently posted entries keyed by strategy/leg so we can reconcile deltas.
-        self.current_entries: Dict[str, Dict[str, Tuple[int, int]]] = {
-            "touch": {},
-            "depth": {},
-            "band": {},
-        }
-        self.exit_orders: Dict[str, Dict[str, Tuple[int, int]]] = {"yes": {}, "no": {}}
 
         # State derived from fills/positions that drive quoting decisions.
         self.net_yes_position: int = 0
@@ -230,13 +133,22 @@ class StrategyEngine:
 
         # Step 2: locate the pending intent in whichever strategy produced it and update that
         # group's accounting so cap checks remain accurate.
-        for group in self.groups.values():
+        for strategy, group in self.groups.items():
             if client_id in group.pending:
                 group.remove_intent(client_id)
                 group.register_fill(count)
                 print(f"{_now_str()}  [GROUP] {group.name} fill +{count} (total {group.filled_contracts})")
                 if group.remaining() <= 0:
                     print(f"{_now_str()}  [GROUP] {group.name} cap hit -> would cancel remaining orders")
+                
+                # Step 3: Update net position based on the fill
+                if "yes" in client_id:
+                    self.net_yes_position += count
+                elif "no" in client_id:
+                    self.net_yes_position -= count
+                
+                # Step 4: Remove from live_orders so sync can create new orders
+                self.live_orders.pop(client_id, None)
                 break
 
     def on_position_update(self, net_yes_position: int) -> None:
@@ -275,32 +187,43 @@ class StrategyEngine:
         strategies_summary: Dict[str, Any] = {}
 
         if self.cfg.touch_enabled:
-            touch_orders, touch_summary = self._run_touchmaker()
+            # Get desired orders from stateless TouchMaker
+            desired_orders = self.touchmaker.run(
+                self.orderbook,
+                self.net_yes_position,
+                self.recent_taker_yes,
+                self.recent_taker_no,
+                self.cfg.max_inventory_contracts
+            )
+            
+            # Sync orders (cancel unwanted, place missing)
+            touch_orders = self._sync_orders("touch", desired_orders)
             emitted.extend(touch_orders)
+            
+            touch_summary = {
+                "status": "active",
+                "desired_orders": len(desired_orders),
+                "emitted_orders": len(touch_orders),
+                "group_remaining": self.groups["touch"].remaining()
+            }
         else:
             self._clear_strategy("touch", reason="disabled")
             touch_summary = {"status": "disabled", "group_remaining": self.groups["touch"].remaining()}
         strategies_summary["touch"] = touch_summary
 
+        # TODO: Update depth and band strategies to use stateless approach
         if self.cfg.depth_enabled:
-            depth_orders, depth_summary = self._run_depth_ladder()
-            emitted.extend(depth_orders)
+            depth_summary = {"status": "disabled", "reason": "not_implemented", "group_remaining": self.groups["depth"].remaining()}
         else:
-            self._clear_strategy("depth", reason="disabled")
             depth_summary = {"status": "disabled", "group_remaining": self.groups["depth"].remaining()}
         strategies_summary["depth"] = depth_summary
 
         if self.cfg.band_enabled:
-            band_orders, band_summary = self._run_band_replenish()
-            emitted.extend(band_orders)
+            band_summary = {"status": "disabled", "reason": "not_implemented", "group_remaining": self.groups["band"].remaining()}
         else:
-            self._clear_strategy("band", reason="disabled")
             band_summary = {"status": "disabled", "group_remaining": self.groups["band"].remaining()}
         strategies_summary["band"] = band_summary
 
-        exit_orders, exit_summary = self._run_exit_orders()
-        emitted.extend(exit_orders)
-        strategies_summary["exit"] = exit_summary
 
         self._last_summary["strategies"] = strategies_summary
 
@@ -310,59 +233,30 @@ class StrategyEngine:
         return self._last_summary
 
     def cancel_all_orders(self) -> List[OrderIntent]:
-        # Sweep all strategies and synthesize cancel intents for graceful shutdowns.
+        # Sweep all live orders and synthesize cancel intents for graceful shutdowns.
         cleanup_intents: List[OrderIntent] = []
-        for strategy, records in self.current_entries.items():
-            for key, (price, size) in list(records.items()):
-                leg = key.split(":")[0]
-                client_id = f"{strategy}-{key}"
-                logger.info("[CLEANUP] cancel %s %s @ %s¢ (%s)", leg.upper(), size, price, strategy)
-                intent = OrderIntent(
-                    ticker=self.cfg.ticker,
-                    strategy=strategy,
-                    purpose="cancel",
-                    action="cancel",
-                    side=leg,
-                    price_cents=price,
-                    count=size,
-                    post_only=True,
-                    expiration_ts=None,
-                    order_group_id=f"order-group-{strategy}",
-                    client_order_id=client_id,
-                )
-                cleanup_intents.append(intent)
-                self._execute_request(
-                    "POST",
-                    "/portfolio/cancel_order",
-                    json_data={"ticker": intent.ticker, "client_order_id": intent.client_order_id},
-                )
-                self.groups[strategy].remove_intent(client_id)
-            records.clear()
-
-        for leg, exits in self.exit_orders.items():
-            for client_id, (price, size) in list(exits.items()):
-                logger.info("[CLEANUP] cancel EXIT %s %s @ %s¢", leg.upper(), size, price)
-                intent = OrderIntent(
-                    ticker=self.cfg.ticker,
-                    strategy="exit",
-                    purpose="cancel",
-                    action="cancel",
-                    side=leg,
-                    price_cents=price,
-                    count=size,
-                    post_only=True,
-                    expiration_ts=None,
-                    order_group_id="order-group-exit",
-                    client_order_id=client_id,
-                )
-                cleanup_intents.append(intent)
-                self._execute_request(
-                    "POST",
-                    "/portfolio/cancel_order",
-                    json_data={"ticker": intent.ticker, "client_order_id": intent.client_order_id},
-                )
-                self.groups["exit"].remove_intent(client_id)
-            exits.clear()
+        for client_id, order in list(self.live_orders.items()):
+            logger.info("[CLEANUP] cancel %s %s @ %s¢ (%s)", 
+                       order.side.upper(), order.count, order.price_cents, order.strategy)
+            intent = OrderIntent(
+                ticker=order.ticker,
+                strategy=order.strategy,
+                purpose="cancel",
+                action="cancel",
+                side=order.side,
+                price_cents=order.price_cents,
+                count=order.count,
+                post_only=True,
+                expiration_ts=None,
+                order_group_id=f"order-group-{order.strategy}",
+                client_order_id=client_id,
+            )
+            # Actually execute the cancel request
+            self._execute_request("POST", "/portfolio/cancel_order", 
+                                json_data={"ticker": self.cfg.ticker, "client_order_id": client_id})
+            cleanup_intents.append(intent)
+            # Remove from live orders
+            self.live_orders.pop(client_id, None)
 
         return cleanup_intents
 
@@ -370,82 +264,6 @@ class StrategyEngine:
     # Strategy implementations
     # ------------------------------------------------------------------
 
-    def _run_touchmaker(self) -> Tuple[List[OrderIntent], Dict[str, Any]]:
-        emitted: List[OrderIntent] = []
-        summary: Dict[str, Any] = {
-            "group_remaining": self.groups["touch"].remaining(),
-            "targets": [],
-            "skipped": [],
-        }
-        assert self.orderbook
-        targets: Dict[str, Tuple[int, int]] = {}
-
-        # Step 1: inspect top-of-book depth for YES/NO using tracker helpers.
-        best_yes_bid = self.orderbook.best_bid("yes")
-        best_yes_ask = self.orderbook.best_ask("yes")
-        best_no_bid = self.orderbook.best_bid("no")
-        best_no_ask = self.orderbook.best_ask("no")
-
-        if (
-            best_yes_bid.price is None
-            or best_yes_ask.price is None
-            or best_no_bid.price is None
-            or best_no_ask.price is None
-        ):
-            self._clear_strategy("touch")
-            return emitted, summary
-
-        yes_room, no_room = self._inventory_room()
-
-        # Step 2: decide if spread + queue heuristics merit quoting on each leg.
-        yes_spread = best_yes_ask.price - best_yes_bid.price
-        if yes_spread >= self.cfg.min_spread_cents and yes_room:
-            price = best_yes_bid.price
-            if (
-                self.cfg.improve_if_last
-                and best_yes_bid.size < self.cfg.queue_small_threshold
-                and best_yes_ask.price - (price + 1) >= self.cfg.min_spread_cents
-            ):
-                price = clamp(price + 1, 0, 99)
-                logger.info("[TOUCH] improving YES by 1 tick (queue=%s)", best_yes_bid.size)
-            targets["yes:touch"] = (price, self.cfg.bid_size_contracts)
-            summary["targets"].append({"leg": "yes", "price": price, "size": self.cfg.bid_size_contracts})
-        elif not yes_room:
-            msg = "inventory room exhausted"
-            logger.info("[TOUCH] skip YES: %s", msg)
-            summary["skipped"].append({"leg": "yes", "reason": msg})
-        else:
-            msg = f"spread {yes_spread} < min {self.cfg.min_spread_cents}"
-            logger.info("[TOUCH] skip YES: %s", msg)
-            summary["skipped"].append({"leg": "yes", "reason": msg})
-
-        no_spread = best_no_ask.price - best_no_bid.price
-        if no_spread >= self.cfg.min_spread_cents and no_room:
-            price = best_no_bid.price
-            if (
-                self.cfg.improve_if_last
-                and best_no_bid.size < self.cfg.queue_small_threshold
-                and best_no_ask.price - (price + 1) >= self.cfg.min_spread_cents
-            ):
-                price = clamp(price + 1, 0, 99)
-                logger.info("[TOUCH] improving NO by 1 tick (queue=%s)", best_no_bid.size)
-            targets["no:touch"] = (price, self.cfg.bid_size_contracts)
-            summary["targets"].append({"leg": "no", "price": price, "size": self.cfg.bid_size_contracts})
-        elif not no_room:
-            msg = "inventory room exhausted"
-            logger.info("[TOUCH] skip NO: %s", msg)
-            summary["skipped"].append({"leg": "no", "reason": msg})
-        else:
-            msg = f"spread {no_spread} < min {self.cfg.min_spread_cents}"
-            logger.info("[TOUCH] skip NO: %s", msg)
-            summary["skipped"].append({"leg": "no", "reason": msg})
-
-        # Step 3: reconcile live orders against target map, emitting required intents.
-        entries, entry_stats = self._reconcile_entries("touch", targets)
-        emitted.extend(entries)
-        summary.update(entry_stats)
-        self._last_summary.setdefault("strategies", {})["touch"] = summary
-        return emitted, summary
 
     def _run_depth_ladder(self) -> Tuple[List[OrderIntent], Dict[str, Any]]:
         emitted: List[OrderIntent] = []
@@ -549,258 +367,40 @@ class StrategyEngine:
         self._last_summary.setdefault("strategies", {})["band"] = summary
         return emitted, summary
 
-    def _run_exit_orders(self) -> Tuple[List[OrderIntent], Dict[str, Any]]:
-        emitted: List[OrderIntent] = []
-        summary: Dict[str, Any] = {"yes": {}, "no": {}}
-        assert self.orderbook
-        # Step 1: treat YES and NO legs independently using current inventory snapshots.
-        yes_orders, yes_stats = self._maintain_exit_leg("yes", self.inv_yes, self.recent_taker_yes)
-        emitted.extend(yes_orders)
-        summary["yes"] = yes_stats
-        no_orders, no_stats = self._maintain_exit_leg("no", self.inv_no, self.recent_taker_no)
-        emitted.extend(no_orders)
-        summary["no"] = no_stats
-        self._last_summary.setdefault("strategies", {})["exit"] = summary
-        return emitted, summary
 
     # ------------------------------------------------------------------
     # Entry helpers
     # ------------------------------------------------------------------
 
-    def _reconcile_entries(self, strategy: str, targets: Dict[str, Tuple[int, int]]) -> Tuple[List[OrderIntent], Dict[str, Any]]:
-        emitted: List[OrderIntent] = []
-        group = self.groups[strategy]
-        previous = self.current_entries[strategy]
-        stats: Dict[str, Any] = {
-            "cancels": [],
-            "posted": [],
-            "skipped_caps": [],
-            "existing": len(previous),
-            "remaining": group.remaining(),
-        }
-
-        # Step 1: cancel any live intents that no longer appear in the desired target map.
-        for key, (price, size) in list(previous.items()):
-            if key not in targets:
-                leg = key.split(":")[0]
-                print(f"{_now_str()}  [CANCEL {strategy.upper()}] {leg.upper()} {size} @ {price}¢")
-                # Issue real cancel against the previously posted client order id
-                client_id = f"{strategy}-{key}"
-                self._execute_request(
-                    "POST",
-                    "/portfolio/cancel_order",
-                    json_data={"ticker": self.cfg.ticker, "client_order_id": client_id},
-                )
-                previous.pop(key, None)
-                group.remove_intent(f"{strategy}-{key}")
-                stats["cancels"].append({"leg": leg, "price": price, "size": size})
-
-        # Step 2: post or amend required intents, respecting per-group caps and TTLs.
-        for key, (price, size) in targets.items():
-            leg = key.split(":")[0]
-            client_id = f"{strategy}-{key}"
-            expires_at = int(time.time() + self.cfg.quote_ttl_seconds)
-
-            if key in previous and previous[key] == (price, size):
-                continue
-
-            if group.remaining() < size:
-                logger.info(
-                    "[CAP] %s remaining %s < size %s -> skip %s",
-                    strategy,
-                    group.remaining(),
-                    size,
-                    key,
-                )
-                stats["skipped_caps"].append({"leg": leg, "size": size, "remaining": group.remaining()})
-                continue
-
-            intent = OrderIntent(
-                ticker=self.cfg.ticker,
-                strategy=strategy,
-                purpose="entry",
-                action="buy",
-                side=leg,
-                price_cents=price,
-                count=size,
-                post_only=True,
-                expiration_ts=expires_at,
-                order_group_id=f"order-group-{strategy}",
-                client_order_id=client_id,
-            )
-            emitted.append(intent)
-            self._emit_order(intent, group)
-            previous[key] = (price, size)
-            stats["posted"].append({"leg": leg, "price": price, "size": size})
-
-        stats["remaining_after"] = group.remaining()
-        return emitted, stats
 
     def _cancel_all_entries(self, reason: str) -> None:
         for strategy in ("touch", "depth", "band"):
             self._clear_strategy(strategy, reason=reason)
 
     def _clear_strategy(self, strategy: str, reason: Optional[str] = None) -> None:
+        """Clear all orders for a strategy."""
         group = self.groups[strategy]
-        previous = self.current_entries[strategy]
-        if not previous:
-            return
         reason_suffix = f" ({reason})" if reason else ""
-        for key, (price, size) in previous.items():
-            leg = key.split(":")[0]
-            print(f"{_now_str()}  [CANCEL {strategy.upper()}] {leg.upper()} {size} @ {price}¢{reason_suffix}")
-            # Send real cancel for the associated client order id
-            client_id = f"{strategy}-{key}"
-            self._execute_request(
-                "POST",
-                "/portfolio/cancel_order",
-                json_data={"ticker": self.cfg.ticker, "client_order_id": client_id},
-            )
-            group.remove_intent(f"{strategy}-{key}")
-        previous.clear()
+        
+        # Cancel all live orders for this strategy
+        for client_id, order in list(self.live_orders.items()):
+            if order.strategy == strategy:
+                print(f"{_now_str()}  [CANCEL {strategy.upper()}] {order.side.upper()} {order.count} @ {order.price_cents}¢{reason_suffix}")
+                self._execute_request(
+                    "POST",
+                    "/portfolio/cancel_order",
+                    json_data={"ticker": self.cfg.ticker, "client_order_id": client_id},
+                )
+                self.live_orders.pop(client_id, None)
+                group.remove_intent(client_id)
 
     # ------------------------------------------------------------------
     # Exit helpers
     # ------------------------------------------------------------------
 
-    def _maintain_exit_leg(self, leg: str, inventory: int, recent_taker: Optional[str]) -> Tuple[List[OrderIntent], Dict[str, Any]]:
-        emitted: List[OrderIntent] = []
-        stats: Dict[str, Any] = {
-            "inventory": inventory,
-            "active": list(self.exit_orders[leg].keys()),
-            "placed": [],
-            "cancelled": [],
-        }
-        exits = self.exit_orders[leg]
-        if inventory <= 0:
-            # Step 1: if we have no exposure on this leg, cancel anything still working.
-            for kind, (price, size) in list(exits.items()):
-                print(f"{_now_str()}  [CANCEL EXIT] {leg.upper()} {size} @ {price}¢")
-                # Cancel the live exit order by its client id (kind)
-                self._execute_request(
-                    "POST",
-                    "/portfolio/cancel_order",
-                    json_data={"ticker": self.cfg.ticker, "client_order_id": kind},
-                )
-                self.groups["exit"].remove_intent(kind)
-                exits.pop(kind, None)
-                stats["cancelled"].append({"kind": kind, "price": price, "size": size})
-            return emitted, stats
 
-        ladder = []
-        if inventory >= self.cfg.exit_ladder_threshold:
-            # Step 2a: large inventory—build a ladder of staged exits.
-            ladder = self._build_exit_ladder(leg, inventory)
-        if not ladder:
-            price = self._compute_exit_price(leg, recent_taker)
-            if price is None:
-                ladder = []
-            else:
-                # Step 2b: otherwise place a single tactical quote sized by exit cap.
-                ladder = [(f"exit-{leg}", price, min(inventory, self.cfg.exit_size_contracts))]
 
-        # Step 3: remove any obsolete exit orders.
-        keep_keys = {kind for kind, _, _ in ladder}
-        for kind in list(exits.keys()):
-            if kind not in keep_keys:
-                price, size = exits[kind]
-                print(f"{_now_str()}  [CANCEL EXIT] {leg.upper()} {size} @ {price}¢")
-                # Send cancel for obsolete exit orders
-                self._execute_request(
-                    "POST",
-                    "/portfolio/cancel_order",
-                    json_data={"ticker": self.cfg.ticker, "client_order_id": kind},
-                )
-                self.groups["exit"].remove_intent(kind)
-                exits.pop(kind, None)
-                stats["cancelled"].append({"kind": kind, "price": price, "size": size})
 
-        # Step 4: install or refresh any ladder quotes that are new/changed.
-        for kind, price, size in ladder:
-            if price is None or size <= 0:
-                continue
-            current = exits.get(kind)
-            if current == (price, size):
-                continue
-            expires_at = int(time.time() + self.cfg.exit_ttl_seconds)
-            intent = OrderIntent(
-                ticker=self.cfg.ticker,
-                strategy="exit",
-                purpose="exit",
-                action="sell",
-                side=leg,
-                price_cents=price,
-                count=size,
-                post_only=True,
-                expiration_ts=expires_at,
-                order_group_id="order-group-exit",
-                client_order_id=kind,
-            )
-            emitted.append(intent)
-            self._emit_order(intent, self.groups["exit"])
-            exits[kind] = (price, size)
-            stats["placed"].append({"kind": kind, "price": price, "size": size})
-
-        return emitted, stats
-
-    def _compute_exit_price(self, leg: str, recent_taker: Optional[str]) -> Optional[int]:
-        assert self.orderbook
-        best_bid = self.orderbook.best_bid(leg)
-        best_ask = self.orderbook.best_ask(leg)
-        if best_bid.price is None or best_ask.price is None:
-            return None
-
-        # Step 1: baseline exit price is the higher of best ask or min-spread over best bid.
-        min_spread = self.cfg.min_spread_cents
-        price = max(best_ask.price, best_bid.price + min_spread)
-
-        if best_ask.size is not None:
-            # Step 2: adjust based on queue size—thin queues invite improvement, heavy queues allow widening.
-            if best_ask.size < self.cfg.queue_small_threshold and best_ask.price - best_bid.price >= min_spread + 1:
-                price = max(best_ask.price - 1, best_bid.price + min_spread)
-            elif best_ask.size >= self.cfg.queue_big_threshold:
-                price = min(100, best_ask.price + 1)
-
-        inventory = self.inv_yes if leg == "yes" else self.inv_no
-        if inventory >= max(self.cfg.exit_ladder_threshold, 50) and price - best_bid.price >= min_spread + 1:
-            # Step 3: heavy inventory pushes us to tighten a tick to exit faster.
-            price = max(best_bid.price + min_spread, price - 1)
-
-        if recent_taker == "down" and price < 100:
-            # Step 4: if recent flow sold into us, nudge price toward the top to increase fill odds.
-            price = min(100, price + 1)
-
-        price = max(price, best_bid.price + min_spread)
-        price = min(price, 100)
-        return price
-
-    def _build_exit_ladder(self, leg: str, inventory: int) -> List[Tuple[str, int, int]]:
-        assert self.orderbook
-        best_bid = self.orderbook.best_bid(leg)
-        best_ask = self.orderbook.best_ask(leg)
-        if best_bid.price is None or best_ask.price is None:
-            return []
-
-        # Step 1: split inventory across a few rungs with diminishing sizes.
-        min_spread = self.cfg.min_spread_cents
-        inv = inventory
-        rung_sizes = [int(max(1, inv * 0.3)), int(max(1, inv * 0.4)), max(0, inv - int(inv * 0.3) - int(inv * 0.4))]
-        rung_sizes = [min(size, self.cfg.exit_size_contracts) for size in rung_sizes if size > 0]
-        if not rung_sizes:
-            return []
-
-        # Step 2: precompute candidate prices around the offer; later rungs use wider quotes.
-        prices = [
-            max(best_ask.price - 1, best_bid.price + min_spread),
-            max(best_ask.price, best_bid.price + min_spread),
-            max(min(best_ask.price + 1, 100), best_bid.price + min_spread),
-        ]
-
-        ladder: List[Tuple[str, int, int]] = []
-        for idx, size in enumerate(rung_sizes):
-            price = prices[min(idx, len(prices) - 1)]
-            ladder.append((f"exit-{leg}-{idx+1}", price, size))
-        return ladder
 
     # ------------------------------------------------------------------
     # Printing helpers
@@ -864,16 +464,96 @@ class StrategyEngine:
             return None
         return (bid + ask) / 2.0
 
-    def _inventory_room(self) -> Tuple[bool, bool]:
-        # Determine whether we still have capacity to add YES or NO inventory relative to caps.
-        cap = self.cfg.max_inventory_contracts
-        yes_ok = self.inv_yes < cap
-        no_ok = self.inv_no < cap
-        if abs(self.net_yes_position) >= cap:
-            logger.info("[INV] cap reached (%s)", self.net_yes_position)
-            return False, False
-        if not yes_ok:
-            logger.info("[INV] YES cap reached (%s)", self.inv_yes)
-        if not no_ok:
-            logger.info("[INV] NO cap reached (%s)", self.inv_no)
-        return yes_ok, no_ok
+    def _sync_orders(self, strategy: str, desired_orders: List[OrderIntent]) -> List[OrderIntent]:
+        """
+        Sync live orders with desired orders for a strategy.
+        
+        Args:
+            strategy: Strategy name (e.g., "touch")
+            desired_orders: List of orders that should exist
+            
+        Returns:
+            List of OrderIntent objects to emit (cancels + new orders)
+        """
+        emitted = []
+        group = self.groups[strategy]
+        
+        # Get current live orders for this strategy
+        current_orders = {client_id: order for client_id, order in self.live_orders.items() 
+                        if order.strategy == strategy}
+        
+        # Cancel orders that are no longer desired
+        for client_id, order in current_orders.items():
+            if not any(d.client_order_id == client_id for d in desired_orders):
+                # Cancel this order
+                cancel_intent = OrderIntent(
+                    ticker=order.ticker,
+                    strategy=order.strategy,
+                    purpose="cancel",
+                    action="cancel",
+                    side=order.side,
+                    price_cents=order.price_cents,
+                    count=order.count,
+                    post_only=True,
+                    client_order_id=client_id,
+                    expiration_ts=None,
+                    order_group_id=f"order-group-{order.strategy}"
+                )
+                # Actually execute the cancel
+                self._execute_request("POST", "/portfolio/cancel_order", 
+                                    json_data={"ticker": self.cfg.ticker, "client_order_id": client_id})
+                emitted.append(cancel_intent)
+                self.live_orders.pop(client_id, None)
+                group.remove_intent(client_id)
+        
+        # Place missing orders or update existing orders
+        for desired_order in desired_orders:
+            client_id = desired_order.client_order_id
+            if client_id not in self.live_orders:
+                # Check if we have capacity
+                if group.remaining() >= desired_order.count:
+                    # Actually execute the order
+                    self._emit_order(desired_order, group)
+                    emitted.append(desired_order)
+                    self.live_orders[client_id] = desired_order
+                    group.add_intent(client_id, desired_order)
+                else:
+                    logger.info(f"[SYNC] {strategy} cap reached, skipping {client_id}")
+            else:
+                # Check if the order properties have changed
+                existing_order = self.live_orders[client_id]
+                if (existing_order.price_cents != desired_order.price_cents or 
+                    existing_order.count != desired_order.count or
+                    existing_order.side != desired_order.side):
+                    # Cancel old order and place new one
+                    cancel_intent = OrderIntent(
+                        ticker=existing_order.ticker,
+                        strategy=existing_order.strategy,
+                        purpose="cancel",
+                        action="cancel",
+                        side=existing_order.side,
+                        price_cents=existing_order.price_cents,
+                        count=existing_order.count,
+                        post_only=True,
+                        client_order_id=client_id,
+                        expiration_ts=None,
+                        order_group_id=f"order-group-{existing_order.strategy}"
+                    )
+                    # Execute cancel
+                    self._execute_request("POST", "/portfolio/cancel_order", 
+                                        json_data={"ticker": self.cfg.ticker, "client_order_id": client_id})
+                    emitted.append(cancel_intent)
+                    self.live_orders.pop(client_id, None)
+                    group.remove_intent(client_id)
+                    
+                    # Place new order
+                    if group.remaining() >= desired_order.count:
+                        # Actually execute the new order
+                        self._emit_order(desired_order, group)
+                        emitted.append(desired_order)
+                        self.live_orders[client_id] = desired_order
+                        group.add_intent(client_id, desired_order)
+                    else:
+                        logger.info(f"[SYNC] {strategy} cap reached, skipping {client_id}")
+        
+        return emitted

@@ -1,14 +1,17 @@
 # Kalshi Market Making Bot
 
-A dual-sided mock market maker for Kalshi prediction markets. The bot listens to Kalshi WebSocket streams, maintains passive bids on both YES and NO legs simultaneously, and posts maker-only exit asks after fills. It prints every intended action (quotes, reprices, exits, reduce-only suggestions) so you can validate the strategy before wiring real order placement.
+A unified market maker for Kalshi prediction markets. The bot listens to Kalshi WebSocket streams and continuously bids both YES and NO sides for spread harvesting, letting Kalshi handle the inventory conversion. It prints every intended action (quotes, reprices) so you can validate the strategy before wiring real order placement.
 
 ## Features
 
 ### 🧠 Strategy Logic
-- **Dual passive bids**: Posts bid-YES and bid-NO together while respecting `bid_yes + bid_no ≤ 100 - cushion` to avoid guaranteed losses.
-- **Post-only exits**: After a fill, rests a post-only ask on the filled leg to farm the spread (default `take_profit_ticks` over the entry).
-- **Inventory-aware**: Positions are sourced directly from the Kalshi `market_positions` WebSocket; exits cancel automatically when inventory goes flat.
-- **Reduce-only prompts**: When inventory hits caps, prints guidance to send reduce-only IOC orders (real order wiring omitted).
+- **Always Bid Both Sides**: TouchMaker continuously bids both YES and NO as long as inventory caps allow
+- **Net Position Logic**: Positive inventory = long YES, negative inventory = long NO
+- **Inventory Caps**: Cap of 100 means range [-100, +100] - stops bidding YES at +100, stops bidding NO at -100
+- **Kalshi Handles Conversion**: Bidding YES when we have NO inventory effectively exits our NO position (and vice versa)
+- **Queue-Aware Pricing**: Adjusts pricing based on queue depth (thin = improve, thick = widen)
+- **Spread Harvesting**: Captures spreads on both sides while managing inventory risk
+- **No Complex State Machine**: Simple logic - bid both sides until caps reached
 
 ### 📊 Real-time Market Data
 - **Orderbook Updates**: Live ladder maintained via `OrderBookTracker` with best N levels printed on every snapshot/delta.
@@ -54,25 +57,41 @@ To actually place orders, add `--live-mode`.
 | `--depth-step` | Tick step between DepthLadder levels | `2` |
 | `--band-rungs` | Number of rungs in BandReplenish | `2` |
 | `--band-width` | Half-width (ticks) for band replenishment | `4` |
-| `--no-depth` | Disable DepthLadder strategy | off |
-| `--no-band` | Disable BandReplenish strategy | off |
-| `--no-touch` | Disable TouchMaker strategy | off |
+| `--enable-touch` | Enable TouchMaker strategy | off |
+| `--enable-depth` | Enable DepthLadder strategy | off |
+| `--enable-band` | Enable BandReplenish strategy | off |
 
 ## How It Works
 
 1. **Orderbook tracking**: `orderbook_tracker.py` maintains YES/NO ladders from Kalshi snapshots/deltas, exposing utilities like `best_bid`, `best_ask`, `spread`, and `top_levels`.
-2. **Strategy core** (`strategy.py`):
-   - `DualSidedMockMaker` receives order book updates, market positions, will compute entry targets for both legs, and prints the bids it would post, repricing as midpoints move.
-   - On fills, inventory is read from the `market_positions` stream; the strategy logs fills and refreshes exit asks accordingly.
-   - Reduce-only suggestions are printed when inventory exceeds configured caps.
-3. **Listener** (`mm_ws_listener.py`): wires the Kalshi WebSocket client to the tracker and strategy, logs public ticker/trade data, and forwards private events when authenticated.
+2. **Unified Strategy** (`touchmaker.py`):
+   - Always bids both YES and NO sides for spread harvesting
+   - Only stops bidding a side when that side's inventory cap is reached
+   - Kalshi handles the conversion (bidding YES when we have NO inventory exits our NO position)
+   - Queue-aware pricing and improvements
+3. **Strategy Engine** (`strategy.py`):
+   - Orchestrates the unified TouchMaker strategy
+   - Handles order reconciliation and group management
+   - Tracks inventory and recent taker flow
+4. **Listener** (`mm_ws_listener.py`): wires the Kalshi WebSocket client to the tracker and strategy, logs public ticker/trade data, and forwards private events when authenticated.
 
 ## Strategy Profiles
 
-### TouchMaker
-- **Goal**: Sit at/near the best bid on both YES and NO when the per-leg spread is wide enough, optionally improving one tick on thin queues.
-- **When it acts**: If `best_ask - best_bid ≥ min_spread_cents` on a leg and you still have inventory room.
-- **Knobs**: `min_spread_cents`, `bid_size_contracts`, `quote_ttl_seconds`, `improve_if_last`, `queue_small_threshold`.
+### TouchMaker (Unified)
+- **Goal**: Always bid both sides for spread harvesting, let Kalshi handle inventory conversion
+- **Logic**: Continuously bid YES and NO as long as inventory caps allow
+- **Inventory Management**: Only stops bidding a side when that side's cap is reached
+- **Conversion**: Bidding YES when we have NO inventory effectively exits our NO position (Kalshi handles this)
+- **Knobs**: `min_spread_cents`, `bid_size_contracts`, `queue_small_threshold`, `queue_big_threshold`, `max_inventory_contracts`
+
+Behavior notes:
+- Holds resting orders and does not aggressively chase when overbid.
+- If `improve_if_last=True` (default) and front-of-queue is thin (`best_bid.size < queue_small_threshold`), it improves by exactly 1 tick provided the spread floor remains satisfied.
+- Quotes auto-refresh after `quote_ttl_seconds`; on refresh, targets are recomputed from the current book and restaged.
+- If mid moves by `cancel_move_ticks` or more, all entries are cancelled and restaged at the new context.
+- Inventory and per-leg spread checks gate all placements.
+
+See `market_making_bot/TOUCHMAKER.md` for full behavior, tuning tips, and examples.
 
 ### DepthLadder
 - **Goal**: Stair-step bids below the top of book across N levels to catch pulls and mean reversion.
@@ -104,13 +123,13 @@ TouchMaker posts passive, post-only bids at/near the best bid on both YES and NO
 
 ### Start the bot (TouchMaker only)
 
-Dry-run in demo mode with private streams, disabling other strategies:
+Dry-run in demo mode with private streams, enabling only TouchMaker:
 
 ```bash
 python market_making_bot/mm_ws_listener.py \
   --ticker KXGDP-25Q4 \
   --with-private --demo-mode \
-  --no-depth --no-band \
+  --enable-touch \
   --min-spread 4 \
   --bid-size 2 \
   --quote-ttl 10 \
