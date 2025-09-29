@@ -100,6 +100,10 @@ class MarketMakingListener:
 
                 # At this point the client is healthy; start consuming events until it stops.
                 logger.info("[WS] connection established (ticker=%s)", self.ticker)
+                
+                # Fetch initial position for the ticker
+                await self._fetch_initial_position()
+                
                 await self._event_loop(client_task)
 
             except asyncio.CancelledError:
@@ -293,16 +297,52 @@ class MarketMakingListener:
             self.engine.on_position_update(position_contracts)
             self.engine.refresh()
 
+    async def _fetch_initial_position(self) -> None:
+        """Fetch the current position for the ticker on startup."""
+        try:
+            logger.info(f"[POSITION] Fetching initial position for {self.ticker}")
+            
+            # Get all positions and find the one for our ticker
+            from kalshi.portfolio_functions import get_all_positions
+            positions = get_all_positions(self.api_client.http_client)
+            
+            if positions and 'market_positions' in positions:
+                for position in positions['market_positions']:
+                    if position.get('ticker') == self.ticker:
+                        position_contracts = position.get('position', 0)
+                        logger.info(f"[POSITION] Found initial position: {position_contracts} contracts for {self.ticker}")
+                        
+                        # Update the strategy engine with the current position
+                        self.engine.on_position_update(position_contracts)
+                        return
+                
+                # If we get here, no position was found for this ticker
+                logger.info(f"[POSITION] No position found for {self.ticker}, using 0")
+                self.engine.on_position_update(0)
+            else:
+                logger.warning(f"[POSITION] Failed to fetch positions, using 0")
+                self.engine.on_position_update(0)
+                
+        except Exception as e:
+            logger.error(f"[POSITION] Error fetching initial position: {e}")
+            # Default to 0 if we can't fetch the position
+            self.engine.on_position_update(0)
+
 
 async def run_listener(ticker: str, with_private: bool, strategy_cfg: StrategyConfig, client_cfg: Config) -> None:
     listener = MarketMakingListener(ticker, with_private, strategy_cfg, client_cfg)
     try:
         await listener.run()
     except KeyboardInterrupt:
-        logger.info("Interrupted, gathering cleanup cancels")
+        logger.info("Interrupted, canceling all outstanding orders...")
         cancels = listener.engine.cancel_all_orders()
+        logger.info(f"[CLEANUP] Canceled {len(cancels)} orders")
         for intent in cancels:
-            logger.info("[CLEANUP] would POST /portfolio/cancel for %s", intent.client_order_id)
+            logger.info("[CLEANUP] Canceled order %s", intent.client_order_id)
+        
+        # Give a moment for cancellations to complete
+        import asyncio
+        await asyncio.sleep(1.0)
     except Exception as exc:
         logger.error("Listener error: %s", exc, exc_info=True)
         raise

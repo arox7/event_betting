@@ -49,9 +49,13 @@ class OrderIntent:
             field: self.price_cents,
             "count": self.count,
             "post_only": self.post_only,
-            "client_order_id": self.client_order_id,
-            "order_group_id": self.order_group_id,
         }
+        # Include client_order_id if provided
+        if self.client_order_id:
+            payload["client_order_id"] = self.client_order_id
+        # Only include order_group_id if it's provided  
+        if self.order_group_id:
+            payload["order_group_id"] = self.order_group_id
         if self.expiration_ts is not None:
             payload["expiration_ts"] = self.expiration_ts
         if self.hedge_with:
@@ -71,8 +75,19 @@ class OrderGroupState:
     group_id: Optional[str] = None
 
     def remaining(self) -> int:
-        """Calculate remaining capacity in this group."""
-        return max(0, self.contracts_limit - self.filled_contracts)
+        """Calculate remaining capacity in this group.
+        
+        Simplified: only count filled contracts, not pending orders.
+        Pending orders are managed by cancel-and-replace strategy.
+        """
+        # Only count actual filled contracts (positions), not pending orders
+        total_exposure = abs(self.filled_contracts)
+        
+        return max(0, self.contracts_limit - total_exposure)
+    
+    def reset_fills(self) -> None:
+        """Reset filled contracts when position is closed."""
+        self.filled_contracts = 0
 
     def register_intent(self, intent: OrderIntent) -> None:
         """Register a new order intent in this group."""
@@ -104,7 +119,7 @@ class StrategyConfig:
     take_profit_ticks: int = 2
     quote_ttl_seconds: int = 6
     exit_ttl_seconds: int = 20
-    cancel_move_ticks: int = 2
+    cancel_move_ticks: int = 3
     max_inventory_contracts: int = 100
     reduce_only_step_contracts: int = 10
 

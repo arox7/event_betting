@@ -55,10 +55,8 @@ class TouchMaker:
             config: StrategyConfig containing all strategy parameters
         """
         self.cfg = config
-        # Track timing for hysteresis and anti-oscillation
-        self._last_quote_time: Dict[str, float] = {}
+        # Track cooldown after shade-down to prevent oscillation
         self._shade_cooldown: Dict[str, float] = {}
-        self._order_version: Dict[str, int] = {"yes": 0, "no": 0}
 
     def run(
         self, 
@@ -112,7 +110,7 @@ class TouchMaker:
                 # Check if we have existing inventory that needs exiting
                 has_yes_inventory = net_position > 0
                 has_no_inventory = net_position < 0
-
+                
                 if has_yes_inventory and no_order:
                     # We have YES inventory, allow NO order to exit (even if sum-guard violated)
                     # But limit NO order size to our YES inventory (reduce-only)
@@ -178,8 +176,32 @@ class TouchMaker:
                     logger.info(f"[TOUCH] Removing NO order - would exceed cap: {target_position} < {-max_inventory}")
                     orders.remove(order)
         
+        
         logger.info(f"[TOUCH] Net position: {net_position}, max: {max_inventory}, orders: {len(orders)}")
         return orders
+
+    def _calculate_midpoint(self, orderbook: OrderBookTracker) -> Optional[float]:
+        """Calculate current market midpoint for change detection."""
+        yes_bid = orderbook.best_bid("yes")
+        yes_ask = orderbook.best_ask("yes")
+        no_bid = orderbook.best_bid("no")
+        no_ask = orderbook.best_ask("no")
+        
+        if not all([yes_bid.price, yes_ask.price, no_bid.price, no_ask.price]):
+            return None
+            
+        # Calculate implied YES ask from NO side
+        implied_yes_ask = 100 - no_bid.price
+        implied_yes_bid = 100 - no_ask.price
+        
+        # Use the tighter spread
+        yes_spread = yes_ask.price - yes_bid.price
+        implied_spread = implied_yes_ask - implied_yes_bid
+        
+        if yes_spread <= implied_spread:
+            return (yes_bid.price + yes_ask.price) / 2.0
+        else:
+            return (implied_yes_bid + implied_yes_ask) / 2.0
 
     def _create_order(
         self,
@@ -221,10 +243,24 @@ class TouchMaker:
             logger.info(f"[TOUCH] Allowing {side.upper()} exit order ({inventory_type} inventory: {inventory_size})")
         
         # Calculate price
-        price = self._calculate_price(orderbook, side, recent_taker)
+        price = self._calculate_price(orderbook, side, recent_taker, is_exit_order)
         
-        # Increment version for this side
-        self._order_version[side] += 1
+        # Generate unique client_order_id for each order to avoid 409 conflicts
+        # Use timestamp + price hash to ensure uniqueness while maintaining some predictability
+        import time
+        import hashlib
+        current_timestamp = int(time.time() * 1000)  # milliseconds for uniqueness
+        price_key = f"{price}-{side}-{self.cfg.ticker}"
+        price_hash = hashlib.md5(price_key.encode()).hexdigest()[:6]
+        client_order_id = f"touch-{side}-{current_timestamp}-{price_hash}"
+        
+        # For exit orders, limit size to inventory (reduce-only)
+        if is_exit_order:
+            max_exit_size = abs(net_position)
+            count = min(self.cfg.bid_size_contracts, max_exit_size)
+            logger.info(f"[TOUCH] Exit order size limited to inventory: {count} (inventory: {max_exit_size})")
+        else:
+            count = self.cfg.bid_size_contracts
         
         return OrderIntent(
             ticker=self.cfg.ticker,
@@ -233,19 +269,20 @@ class TouchMaker:
             action="buy",
             side=side,
             price_cents=price,
-            count=self.cfg.bid_size_contracts,
+            count=count,
             post_only=True,
-            client_order_id=f"touch-{side}:touch#{self._order_version[side]}",
+            client_order_id=client_order_id,
             expiration_ts=int(time.time() + self.cfg.quote_ttl_seconds),
-            order_group_id="order-group-touch"
+            order_group_id=None
         )
     
     
     def _calculate_price(
-        self,
-        orderbook: OrderBookTracker,
+        self, 
+        orderbook: OrderBookTracker, 
         side: str,
-        recent_taker: Optional[str]
+        recent_taker: Optional[str],
+        is_exit_order: bool = False
     ) -> int:
         """
         Calculate optimal price with hysteresis and anti-oscillation.
@@ -254,6 +291,7 @@ class TouchMaker:
             orderbook: Current orderbook state
             side: "yes" or "no"
             recent_taker: Recent taker flow direction
+            is_exit_order: Whether this is an exit order (bypasses restrictions)
             
         Returns:
             Price in cents for the order
@@ -264,17 +302,17 @@ class TouchMaker:
         queue_size = bid.size or 0
         current_time = time.time()
         
+        # Exit orders bypass all tick movement restrictions - use base price
+        if is_exit_order:
+            logger.info(f"[TOUCH] Exit order using base price: {base_price} (bypassing queue/cooldown logic)")
+            return base_price
+        
+        
         # Check cooldown after previous shade-down
         if side in self._shade_cooldown:
             cooldown_remaining = self._shade_cooldown[side] - current_time
             if cooldown_remaining > 0:
                 logger.info(f"[TOUCH] {side.upper()} in cooldown: {cooldown_remaining:.1f}s left")
-                return base_price
-        
-        # Check minimum time between requotes
-        if side in self._last_quote_time:
-            time_since_last = current_time - self._last_quote_time[side]
-            if time_since_last < (self.cfg.min_time_between_requotes_ms / 1000.0):
                 return base_price
         
         # Hysteresis-based queue logic
@@ -302,7 +340,6 @@ class TouchMaker:
             price = base_price
             logger.info(f"[TOUCH] touching {side.upper()} bid at {base_price} (queue={queue_size}, in hysteresis band)")
 
-        # Update timing
-        self._last_quote_time[side] = current_time
         return price
+
     

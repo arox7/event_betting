@@ -86,6 +86,27 @@ class StrategyEngine:
         if not self._should_execute():
             logger.info("--> Would %s %s with payload:\n%s", method, path, json.dumps(json_data, indent=2))
             return None
+        
+        # DEBUG: Track order patterns that might trigger 409s
+        if path == "/portfolio/orders" and json_data.get('client_order_id'):
+            client_order_id = json_data['client_order_id']
+            logger.debug(f"[STRATEGY DEBUG] Placing order: {client_order_id}")
+            logger.debug(f"[STRATEGY DEBUG] Order payload: {json_data}")
+            
+            # Track timing patterns
+            import time
+            current_time = time.time()
+            if hasattr(self, '_last_order_time'):
+                time_since_last = current_time - self._last_order_time
+                logger.debug(f"[STRATEGY DEBUG] Time since last order: {time_since_last:.2f}s")
+            self._last_order_time = current_time
+            
+            # Track order count in this session
+            if not hasattr(self, '_order_count'):
+                self._order_count = 0
+            self._order_count += 1
+            logger.debug(f"[STRATEGY DEBUG] Order count in session: {self._order_count}")
+        
         try:
             response = self.order_executor.http_client.make_authenticated_request(method, path, json_data=json_data)
         except Exception as exc:
@@ -136,8 +157,13 @@ class StrategyEngine:
         for strategy, group in self.groups.items():
             if client_id in group.pending:
                 group.remove_intent(client_id)
-                group.register_fill(count)
-                print(f"{_now_str()}  [GROUP] {group.name} fill +{count} (total {group.filled_contracts})")
+                # Update group position (absolute value)
+                if "yes" in client_id:
+                    group.filled_contracts = abs(self.net_yes_position + count)
+                elif "no" in client_id:
+                    group.filled_contracts = abs(self.net_yes_position - count)
+                
+                print(f"{_now_str()}  [GROUP] {group.name} fill +{count} (position: {group.filled_contracts})")
                 if group.remaining() <= 0:
                     print(f"{_now_str()}  [GROUP] {group.name} cap hit -> would cancel remaining orders")
                 
@@ -155,6 +181,7 @@ class StrategyEngine:
         # Single scalar from the listener representing YES contracts minus NO contracts.
         # Downstream helpers (`inv_yes`/`inv_no`) convert this into per-leg inventory.
         self.net_yes_position = net_yes_position
+
 
     def refresh(self) -> List[OrderIntent]:
         """Recompute strategy actions and return emitted intents for logging."""
@@ -211,21 +238,21 @@ class StrategyEngine:
             touch_summary = {"status": "disabled", "group_remaining": self.groups["touch"].remaining()}
         strategies_summary["touch"] = touch_summary
 
-        # TODO: Update depth and band strategies to use stateless approach
-        if self.cfg.depth_enabled:
-            depth_summary = {"status": "disabled", "reason": "not_implemented", "group_remaining": self.groups["depth"].remaining()}
-        else:
-            depth_summary = {"status": "disabled", "group_remaining": self.groups["depth"].remaining()}
-        strategies_summary["depth"] = depth_summary
-
-        if self.cfg.band_enabled:
-            band_summary = {"status": "disabled", "reason": "not_implemented", "group_remaining": self.groups["band"].remaining()}
-        else:
-            band_summary = {"status": "disabled", "group_remaining": self.groups["band"].remaining()}
-        strategies_summary["band"] = band_summary
-
-
         self._last_summary["strategies"] = strategies_summary
+
+        # Log request frequency stats every 10 refreshes
+        if not hasattr(self, '_stats_log_counter'):
+            self._stats_log_counter = 0
+        self._stats_log_counter += 1
+        
+        if self._stats_log_counter % 10 == 0:
+            try:
+                stats = self.order_executor.http_client.get_request_stats()
+                logger.info(f"[STATS] Request frequency: {stats['total_requests']} total requests, "
+                           f"{stats['time_since_last_request']:.1f}s since last, "
+                           f"{stats['avg_requests_per_second']:.2f} req/s avg")
+            except Exception as e:
+                logger.debug(f"[STATS] Could not get request stats: {e}")
 
         return emitted
 
@@ -234,6 +261,7 @@ class StrategyEngine:
 
     def cancel_all_orders(self) -> List[OrderIntent]:
         # Sweep all live orders and synthesize cancel intents for graceful shutdowns.
+        logger.info(f"[CLEANUP] Found {len(self.live_orders)} orders to cancel: {list(self.live_orders.keys())}")
         cleanup_intents: List[OrderIntent] = []
         for client_id, order in list(self.live_orders.items()):
             logger.info("[CLEANUP] cancel %s %s @ %s¢ (%s)", 
@@ -248,12 +276,18 @@ class StrategyEngine:
                 count=order.count,
                 post_only=True,
                 expiration_ts=None,
-                order_group_id=f"order-group-{order.strategy}",
+                order_group_id=None,  # Remove order groups to simplify
                 client_order_id=client_id,
             )
-            # Actually execute the cancel request
-            self._execute_request("POST", "/portfolio/cancel_order", 
-                                json_data={"ticker": self.cfg.ticker, "client_order_id": client_id})
+            # Actually execute the cancel request (handle 404 gracefully - order may not exist)
+            try:
+                self._execute_request("POST", "/portfolio/cancel_order", 
+                                    json_data={"ticker": self.cfg.ticker, "client_order_id": client_id})
+            except StrategyExecutionError as e:
+                if e.status_code == 404:
+                    logger.info("[LIVE CANCEL] Order %s not found (404) - treating as success", client_id)
+                else:
+                    raise
             cleanup_intents.append(intent)
             # Remove from live orders
             self.live_orders.pop(client_id, None)
@@ -386,11 +420,18 @@ class StrategyEngine:
         for client_id, order in list(self.live_orders.items()):
             if order.strategy == strategy:
                 print(f"{_now_str()}  [CANCEL {strategy.upper()}] {order.side.upper()} {order.count} @ {order.price_cents}¢{reason_suffix}")
-                self._execute_request(
-                    "POST",
-                    "/portfolio/cancel_order",
-                    json_data={"ticker": self.cfg.ticker, "client_order_id": client_id},
-                )
+                # Handle 404 gracefully - order may not exist
+                try:
+                    self._execute_request(
+                        "POST",
+                        "/portfolio/cancel_order",
+                        json_data={"ticker": self.cfg.ticker, "client_order_id": client_id},
+                    )
+                except StrategyExecutionError as e:
+                    if e.status_code == 404:
+                        logger.info("[LIVE CANCEL] Order %s not found (404) - treating as success", client_id)
+                    else:
+                        raise
                 self.live_orders.pop(client_id, None)
                 group.remove_intent(client_id)
 
@@ -406,39 +447,50 @@ class StrategyEngine:
     # Printing helpers
     # ------------------------------------------------------------------
 
-    def _emit_order(self, intent: OrderIntent, group: OrderGroupState) -> None:
-        if not group.created:
-            # First order for this group—we would normally create the order-group on Kalshi.
-            payload = {"contracts_limit": group.contracts_limit}
-            logger.info(f"{_now_str()}  [ORDER GROUP] create")
-            resp = self._execute_request("POST", "/portfolio/order_groups/create", json_data=payload)
-            # Parse order_group_id if provided (live API typically returns it). For test fakes
-            # that return no JSON, skip assignment and proceed.
-            if resp:
-                try:
-                    body = resp.json() if hasattr(resp, "json") else json.loads(getattr(resp, "text", "{}"))
-                    group_id = (body or {}).get("order_group_id")
-                    if isinstance(group_id, str):
-                        group_id = group_id.strip()
-                    if group_id and isinstance(group_id, str) and len(group_id) == UUID4_HEX_LEN and group_id.count("-") == 4:
-                        group.group_id = group_id
-                except Exception:
-                    # Best-effort: absence or parse failure isn't fatal here because non-UUID
-                    # IDs are acceptable in dry-run/tests; live failures already raised earlier.
-                    pass
-            group.created = True
+    def _place_and_track_order(self, intent: OrderIntent, group: OrderGroupState) -> bool:
+        """
+        Place an order on the exchange and track it if successful.
+        
+        Returns:
+            True if order was successfully placed and tracked, False otherwise
+        """
+        try:
+            # Simple delay between order placements
+            time.sleep(0.2)  # 200ms delay
+            self._emit_order(intent, group)
+            # Reset auth failure counter on successful order
+            if hasattr(self, '_auth_failures'):
+                self._auth_failures = 0
+            return True
+        except StrategyExecutionError as e:
+            # Only handle specific errors gracefully (like 409 auth issues)
+            if e.status_code == 409 and "try_logging_in" in e.body:
+                logger.error(f"[LIVE ORDER] Auth error (409) for order {intent.client_order_id}: {e.body}")
+                # 409 errors are handled by the HTTP client with automatic session reset and retry
+                logger.warning(f"[LIVE ORDER] 409 authentication error - session will be reset and retried")
+                
+                return False
+            else:
+                # Re-raise other errors so tests and callers can handle them
+                raise
+        except Exception as e:
+            logger.error(f"[LIVE ORDER] Unexpected error placing order {intent.client_order_id}: {e}")
+            return False
 
-        group.register_intent(intent)
+    def _emit_order(self, intent: OrderIntent, group: OrderGroupState) -> None:
         action = "BUY" if intent.action == "buy" else "SELL"
         logger.info(
             f"{_now_str()}  [ORDER {intent.strategy.upper()}] {action} {intent.side.upper()} "
-            f"{intent.count} @ {intent.price_cents}¢ (group={group.name})"
+            f"{intent.count} @ {intent.price_cents}¢"
         )
         payload = intent.to_api_payload()
-        # Always override order_group_id with the live group id if present
-        if group.group_id:
-            payload["order_group_id"] = group.group_id
+        
+        # Place order on exchange (no order group needed)
         resp = self._execute_request("POST", "/portfolio/orders", json_data=payload)
+        
+        # Only register intent AFTER successful order placement
+        group.register_intent(intent)
+
 
     # ------------------------------------------------------------------
     # Convenience properties
@@ -478,82 +530,102 @@ class StrategyEngine:
         emitted = []
         group = self.groups[strategy]
         
-        # Get current live orders for this strategy
-        current_orders = {client_id: order for client_id, order in self.live_orders.items() 
-                        if order.strategy == strategy}
-        
-        # Cancel orders that are no longer desired
-        for client_id, order in current_orders.items():
-            if not any(d.client_order_id == client_id for d in desired_orders):
-                # Cancel this order
-                cancel_intent = OrderIntent(
-                    ticker=order.ticker,
-                    strategy=order.strategy,
-                    purpose="cancel",
-                    action="cancel",
-                    side=order.side,
-                    price_cents=order.price_cents,
-                    count=order.count,
-                    post_only=True,
-                    client_order_id=client_id,
-                    expiration_ts=None,
-                    order_group_id=f"order-group-{order.strategy}"
+        # Smart cancel-and-replace: only cancel orders that need to be changed
+
+        def _fingerprint(order: OrderIntent) -> tuple[str, str, int, int]:
+            return (order.side, order.action, order.price_cents, order.count)
+
+        desired_fps = [_fingerprint(order) for order in desired_orders]
+        matched_indices: set[int] = set()
+        orders_to_cancel: list[OrderIntent] = []
+
+        logger.debug(
+            "[SYNC] %s comparing %d existing orders with %d desired orders",
+            strategy,
+            sum(1 for order in self.live_orders.values() if order.strategy == strategy),
+            len(desired_orders),
+        )
+
+        for existing_client_id, existing_order in self.live_orders.items():
+            if existing_order.strategy != strategy:
+                continue
+
+            existing_fp = _fingerprint(existing_order)
+            match_idx: int | None = None
+            for idx, fp in enumerate(desired_fps):
+                if idx in matched_indices:
+                    continue
+                if fp == existing_fp:
+                    match_idx = idx
+                    break
+
+            if match_idx is None:
+                orders_to_cancel.append(existing_order)
+                logger.info(
+                    "[SYNC] %s canceling %s order (no matching desired order)",
+                    strategy,
+                    existing_order.side,
                 )
-                # Actually execute the cancel
+            else:
+                matched_indices.add(match_idx)
+                logger.debug(
+                    "[SYNC] %s keeping existing %s order (price=%s, count=%s)",
+                    strategy,
+                    existing_order.side,
+                    existing_order.price_cents,
+                    existing_order.count,
+                )
+
+        # Remove matched desired orders from further consideration
+        unmatched_desired = [order for idx, order in enumerate(desired_orders) if idx not in matched_indices]
+
+        # Step 2: Cancel orders that need to be changed
+        for existing_order in orders_to_cancel:
+            client_id = existing_order.client_order_id
+            logger.info(f"[SYNC] {strategy} canceling order {client_id}")
+            
+            try:
                 self._execute_request("POST", "/portfolio/cancel_order", 
                                     json_data={"ticker": self.cfg.ticker, "client_order_id": client_id})
-                emitted.append(cancel_intent)
-                self.live_orders.pop(client_id, None)
-                group.remove_intent(client_id)
-        
-        # Place missing orders or update existing orders
-        for desired_order in desired_orders:
-            client_id = desired_order.client_order_id
-            if client_id not in self.live_orders:
-                # Check if we have capacity
-                if group.remaining() >= desired_order.count:
-                    # Actually execute the order
-                    self._emit_order(desired_order, group)
-                    emitted.append(desired_order)
-                    self.live_orders[client_id] = desired_order
-                    group.add_intent(client_id, desired_order)
+                logger.info(f"[SYNC] {strategy} successfully canceled {client_id}")
+            except StrategyExecutionError as e:
+                if e.status_code == 404:
+                    logger.info(f"[SYNC] {strategy} order {client_id} not found (404) - treating as success")
                 else:
-                    logger.info(f"[SYNC] {strategy} cap reached, skipping {client_id}")
+                    logger.error(f"[SYNC] {strategy} failed to cancel order {client_id}: {e}")
+                    # Exit program if cancel fails (as requested)
+                    raise SystemExit(f"Failed to cancel order {client_id}: {e}")
+            
+            # Remove from tracking
+            self.live_orders.pop(client_id, None)
+            group.remove_intent(client_id)
+        
+        # Step 3: Place new orders for unmatched desired intents
+        for desired_order in unmatched_desired:
+            client_id = desired_order.client_order_id
+            logger.info(
+                "[SYNC] %s placing new order %s (content: %s %s¢ %s contracts)",
+                strategy,
+                client_id,
+                desired_order.side,
+                desired_order.price_cents,
+                desired_order.count,
+            )
+
+            if self._place_and_track_order(desired_order, group):
+                emitted.append(desired_order)
+                self.live_orders[client_id] = desired_order
+                group.add_intent(client_id, desired_order)
+                logger.debug(
+                    "[SYNC] %s added order to live_orders: %s (%s %s¢ %s)",
+                    strategy,
+                    client_id,
+                    desired_order.side,
+                    desired_order.price_cents,
+                    desired_order.count,
+                )
             else:
-                # Check if the order properties have changed
-                existing_order = self.live_orders[client_id]
-                if (existing_order.price_cents != desired_order.price_cents or 
-                    existing_order.count != desired_order.count or
-                    existing_order.side != desired_order.side):
-                    # Cancel old order and place new one
-                    cancel_intent = OrderIntent(
-                        ticker=existing_order.ticker,
-                        strategy=existing_order.strategy,
-                        purpose="cancel",
-                        action="cancel",
-                        side=existing_order.side,
-                        price_cents=existing_order.price_cents,
-                        count=existing_order.count,
-                        post_only=True,
-                        client_order_id=client_id,
-                        expiration_ts=None,
-                        order_group_id=f"order-group-{existing_order.strategy}"
-                    )
-                    # Execute cancel
-                    self._execute_request("POST", "/portfolio/cancel_order", 
-                                        json_data={"ticker": self.cfg.ticker, "client_order_id": client_id})
-                    emitted.append(cancel_intent)
-                    self.live_orders.pop(client_id, None)
-                    group.remove_intent(client_id)
-                    
-                    # Place new order
-                    if group.remaining() >= desired_order.count:
-                        # Actually execute the new order
-                        self._emit_order(desired_order, group)
-                        emitted.append(desired_order)
-                        self.live_orders[client_id] = desired_order
-                        group.add_intent(client_id, desired_order)
-                    else:
-                        logger.info(f"[SYNC] {strategy} cap reached, skipping {client_id}")
+                logger.error(f"[SYNC] {strategy} failed to place order {client_id}")
+                raise SystemExit(f"Failed to place order {client_id}")
         
         return emitted

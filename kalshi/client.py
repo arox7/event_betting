@@ -26,10 +26,23 @@ logger = logging.getLogger(__name__)
 class KalshiAPIClient:
     """Refactored Kalshi API client using functional modules."""
     
+    # Global shared instance
+    _instance = None
+    
+    def __new__(cls, config: Config):
+        """Return the single shared instance."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
     def __init__(self, config: Config):
-        """Initialize the Kalshi API client."""
+        """Initialize the Kalshi API client (only once)."""
+        if hasattr(self, '_initialized'):
+            return
+            
         self.config = config
         self.http_client = KalshiHTTPClient(config)
+        self._initialized = True
         
     # Market Functions
     def get_markets(self, limit: int = 100, status: Optional[str] = None) -> List[Any]:
@@ -141,3 +154,14 @@ class KalshiAPIClient:
     def health_check(self) -> bool:
         """Check if the API client is working properly."""
         return self.http_client.health_check()
+    
+    @classmethod
+    def reset_shared_client(cls):
+        """Reset the shared HTTP client (useful for session issues)."""
+        KalshiHTTPClient.reset_instance()
+    
+    @classmethod
+    def reset_instance(cls):
+        """Reset the single API client instance."""
+        cls._instance = None
+        logger.info("[AUTH] API client instance reset")

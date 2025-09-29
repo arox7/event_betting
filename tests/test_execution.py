@@ -158,7 +158,7 @@ def test_reconcile_cancels_previous_entries_on_clear_live(yes_no_book):
     cancel_calls = [j for (_m, p, j) in executor.http_client.calls if p == "/portfolio/cancel_order"]
     cancel_ids = {j.get("client_order_id") for j in cancel_calls}
     # Expect cancels for both original touch client ids
-    assert {"touch-yes:touch", "touch-no:touch"}.issubset(cancel_ids)
+    assert {"touch-yes", "touch-no"}.issubset(cancel_ids)
 
 
 def test_exit_cancels_when_inventory_goes_flat_live(yes_no_book):
