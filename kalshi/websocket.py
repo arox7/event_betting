@@ -39,6 +39,8 @@ class KalshiWebSocketClient:
         self.reconnect_delay = 2
         self.message_id_counter = 0
         self.subscription_ids = {}  # Track subscription IDs
+        self.subscribed_channels = set()  # Track which channels are already subscribed
+        self.pending_subscriptions = {}  # Map msg_id to subscription details for debugging
         self._listener_task = None
         
         # Initialize private key for authentication
@@ -163,33 +165,115 @@ class KalshiWebSocketClient:
         
         try:
             message = json.dumps(subscription)
+            # Extract details for better logging
+            params = subscription.get("params", {})
+            channels = params.get("channels", [])
+            ticker = params.get("market_ticker") or params.get("market_tickers", "N/A")
+            msg_id = subscription.get('id')
+            
+            # Track this subscription for debugging
+            self.pending_subscriptions[msg_id] = {
+                "channels": channels,
+                "ticker": ticker,
+                "sent_at": datetime.now(timezone.utc)
+            }
+            
+            logger.info(f"[SUBSCRIBE] Sending: channels={channels}, ticker={ticker}, msg_id={msg_id}")
+            
             await self.ws.send(message)
-            logger.debug(f"Sent subscription: {message}")
+            logger.debug(f"[SUBSCRIBE] Full message: {message}")
         except Exception as e:
-            logger.error(f"Failed to send subscription: {e}")
+            logger.error(f"[SUBSCRIBE] Failed to send: {e}")
     
-    def subscribe_orderbook_updates(self, market_tickers: List[str], callback: Optional[Callable] = None):
-        """Subscribe to orderbook updates for specified markets."""
+    async def _update_subscription(self, channel: str, market_tickers: List[str]):
+        """Update an existing subscription to add more tickers."""
+        if not self.ws or not self.running:
+            logger.warning("WebSocket not connected, cannot update subscription")
+            return
+        
+        if not market_tickers:
+            return
+        
+        # Get the SID for this channel
+        sid = self.subscription_ids.get(channel)
+        if not sid:
+            logger.warning(f"No SID found for channel {channel}, cannot update")
+            return
+        
+        # Send update command with all tickers at once
         msg_id = self._get_next_message_id()
-        subscription = {
+        update_msg = {
             "id": msg_id,
-            "cmd": "subscribe",
+            "cmd": "update_subscription",
             "params": {
-                "channels": ["orderbook_delta"],
-                "market_ticker": market_tickers[0] if market_tickers else None
+                "sids": [sid],
+                "market_tickers": market_tickers,
+                "action": "add_markets"
             }
         }
         
-        self.subscriptions.add(json.dumps(subscription))
+        logger.info(f"[UPDATE] Adding {len(market_tickers)} tickers to {channel} (SID={sid}): {market_tickers}")
+        
+        try:
+            message = json.dumps(update_msg)
+            await self.ws.send(message)
+        except Exception as e:
+            logger.error(f"[UPDATE] Failed to update subscription: {e}")
+    
+    async def subscribe_orderbook_updates(self, market_tickers: List[str], callback: Optional[Callable] = None):
+        """Subscribe to orderbook updates for specified markets.
+        
+        Kalshi's WebSocket API allows only one subscription per channel.
+        For the first ticker, we subscribe. For additional tickers, we update the subscription.
+        """
+        if not market_tickers:
+            logger.warning("No market tickers provided for orderbook subscription")
+            return
+            
         self._register_callback("orderbook_delta", callback)
         
-        if self.running and self.ws:
-            # Create task and store it to prevent garbage collection
-            task = asyncio.create_task(self._send_subscription(subscription))
-            # Don't await here since this is a sync method
+        # Check if we already have an orderbook subscription
+        channel_key = "orderbook_delta"
+        has_subscription = channel_key in self.subscribed_channels
+        
+        if not has_subscription:
+            # First subscription - subscribe to the first ticker
+            ticker = market_tickers[0]
+            msg_id = self._get_next_message_id()
+            subscription = {
+                "id": msg_id,
+                "cmd": "subscribe",
+                "params": {
+                    "channels": ["orderbook_delta"],
+                    "market_ticker": ticker
+                }
+            }
+            
+            self.subscribed_channels.add(channel_key)
+            
+            if self.running and self.ws:
+                await self._send_subscription(subscription)
+            else:
+                self.subscriptions.add(json.dumps(subscription))
+            
+            # If there are more tickers, update the subscription
+            if len(market_tickers) > 1:
+                await asyncio.sleep(0.2)  # Wait for subscription to complete
+                await self._update_subscription("orderbook_delta", market_tickers[1:])
+        else:
+            # Already subscribed, just update with new tickers
+            await self._update_subscription("orderbook_delta", market_tickers)
     
-    def subscribe_market_ticker(self, market_tickers: List[str], callback: Optional[Callable] = None):
-        """Subscribe to ticker updates for specified markets."""
+    async def subscribe_market_ticker(self, market_tickers: List[str], callback: Optional[Callable] = None):
+        """Subscribe to ticker updates for specified markets.
+        
+        Note: The ticker channel supports subscribing to multiple markets in a single
+        subscription request (unlike orderbook and trade channels).
+        """
+        if not market_tickers:
+            logger.warning("No market tickers provided for ticker subscription")
+            return
+            
         msg_id = self._get_next_message_id()
         subscription = {
             "id": msg_id,
@@ -200,35 +284,59 @@ class KalshiWebSocketClient:
             }
         }
         
-        self.subscriptions.add(json.dumps(subscription))
         self._register_callback("ticker", callback)
         
+        # Send immediately if connected, otherwise store for later
         if self.running and self.ws:
-            # Create task and store it to prevent garbage collection
-            task = asyncio.create_task(self._send_subscription(subscription))
-            # Don't await here since this is a sync method
+            await self._send_subscription(subscription)
+        else:
+            self.subscriptions.add(json.dumps(subscription))
     
-    def subscribe_public_trades(self, market_tickers: List[str], callback: Optional[Callable] = None):
-        """Subscribe to public trade updates for specified markets."""
-        msg_id = self._get_next_message_id()
-        subscription = {
-            "id": msg_id,
-            "cmd": "subscribe",
-            "params": {
-                "channels": ["trade"],
-                "market_ticker": market_tickers[0] if market_tickers else None
-            }
-        }
+    async def subscribe_public_trades(self, market_tickers: List[str], callback: Optional[Callable] = None):
+        """Subscribe to public trade updates for specified markets.
         
-        self.subscriptions.add(json.dumps(subscription))
+        Kalshi's WebSocket API allows only one subscription per channel.
+        For the first ticker, we subscribe. For additional tickers, we update the subscription.
+        """
+        if not market_tickers:
+            logger.warning("No market tickers provided for trade subscription")
+            return
+            
         self._register_callback("trade", callback)
         
-        if self.running and self.ws:
-            # Create task and store it to prevent garbage collection
-            task = asyncio.create_task(self._send_subscription(subscription))
-            # Don't await here since this is a sync method
+        # Check if we already have a trade subscription
+        channel_key = "trade"
+        has_subscription = channel_key in self.subscribed_channels
+        
+        if not has_subscription:
+            # First subscription - subscribe to the first ticker
+            ticker = market_tickers[0]
+            msg_id = self._get_next_message_id()
+            subscription = {
+                "id": msg_id,
+                "cmd": "subscribe",
+                "params": {
+                    "channels": ["trade"],
+                    "market_ticker": ticker
+                }
+            }
+            
+            self.subscribed_channels.add(channel_key)
+            
+            if self.running and self.ws:
+                await self._send_subscription(subscription)
+            else:
+                self.subscriptions.add(json.dumps(subscription))
+            
+            # If there are more tickers, update the subscription
+            if len(market_tickers) > 1:
+                await asyncio.sleep(0.2)  # Wait for subscription to complete
+                await self._update_subscription("trade", market_tickers[1:])
+        else:
+            # Already subscribed, just update with new tickers
+            await self._update_subscription("trade", market_tickers)
     
-    def subscribe_fills(self, callback: Optional[Callable] = None):
+    async def subscribe_fills(self, callback: Optional[Callable] = None):
         """Subscribe to fills (trade confirmations) for authenticated user."""
         msg_id = self._get_next_message_id()
         subscription = {
@@ -239,15 +347,15 @@ class KalshiWebSocketClient:
             }
         }
         
-        self.subscriptions.add(json.dumps(subscription))
         self._register_callback("fill", callback)
         
+        # Send immediately if connected, otherwise store for later
         if self.running and self.ws:
-            # Create task and store it to prevent garbage collection
-            task = asyncio.create_task(self._send_subscription(subscription))
-            # Don't await here since this is a sync method
+            await self._send_subscription(subscription)
+        else:
+            self.subscriptions.add(json.dumps(subscription))
     
-    def subscribe_market_positions(self, callback: Optional[Callable] = None):
+    async def subscribe_market_positions(self, callback: Optional[Callable] = None):
         """Subscribe to market positions updates for authenticated user."""
         msg_id = self._get_next_message_id()
         subscription = {
@@ -258,13 +366,13 @@ class KalshiWebSocketClient:
             }
         }
         
-        self.subscriptions.add(json.dumps(subscription))
         self._register_callback("market_positions", callback)
         
+        # Send immediately if connected, otherwise store for later
         if self.running and self.ws:
-            # Create task and store it to prevent garbage collection
-            task = asyncio.create_task(self._send_subscription(subscription))
-            # Don't await here since this is a sync method
+            await self._send_subscription(subscription)
+        else:
+            self.subscriptions.add(json.dumps(subscription))
     
     def _register_callback(self, channel: str, callback: Optional[Callable]):
         """Register a callback for a specific channel."""
@@ -285,9 +393,14 @@ class KalshiWebSocketClient:
                 msg = data.get("msg", {})
                 channel = msg.get("channel")
                 sid = msg.get("sid")
-                logger.info(f"Subscribed to {channel} with SID {sid}")
+                market_ticker = msg.get("market_ticker", "N/A")
+                msg_id = data.get("id", "unknown")
+                logger.info(f"[SUBSCRIBED] msg_id={msg_id}, channel={channel}, ticker={market_ticker}, SID={sid}")
                 if channel:
                     self.subscription_ids[channel] = sid
+                
+                # Clean up pending subscription
+                self.pending_subscriptions.pop(msg_id, None)
                     
             elif msg_type == "unsubscribed":
                 # Unsubscription confirmation
@@ -301,7 +414,21 @@ class KalshiWebSocketClient:
             elif msg_type == "error":
                 # Error response
                 error_msg = data.get("msg", {})
-                logger.error(f"WebSocket error: {error_msg}")
+                error_code = error_msg.get("code") if isinstance(error_msg, dict) else None
+                msg_id = data.get("id", "unknown")
+                
+                # Look up what subscription this error is for
+                sub_info = self.pending_subscriptions.get(msg_id, {})
+                channels = sub_info.get("channels", "unknown")
+                ticker = sub_info.get("ticker", "unknown")
+                
+                logger.error(
+                    f"[WS ERROR] msg_id={msg_id}, channels={channels}, ticker={ticker}, "
+                    f"code={error_code}, error={error_msg}"
+                )
+                
+                # Clean up pending subscription
+                self.pending_subscriptions.pop(msg_id, None)
                 
             else:
                 # This should be actual data messages
@@ -496,13 +623,13 @@ class WebSocketManager:
         """Async method to subscribe to market data."""
         try:
             # Subscribe to orderbook updates
-            self.ws_client.subscribe_orderbook_updates(market_tickers)
+            await self.ws_client.subscribe_orderbook_updates(market_tickers)
             
             # Subscribe to market ticker updates
-            self.ws_client.subscribe_market_ticker(market_tickers)
+            await self.ws_client.subscribe_market_ticker(market_tickers)
             
             # Subscribe to public trades
-            self.ws_client.subscribe_public_trades(market_tickers)
+            await self.ws_client.subscribe_public_trades(market_tickers)
             
             logger.info(f"Subscribed to market data for {len(market_tickers)} tickers")
         except Exception as e:
@@ -535,10 +662,10 @@ class WebSocketManager:
         """Async method to subscribe to user data."""
         try:
             # Subscribe to fills
-            self.ws_client.subscribe_fills()
+            await self.ws_client.subscribe_fills()
             
             # Subscribe to market positions
-            self.ws_client.subscribe_market_positions()
+            await self.ws_client.subscribe_market_positions()
             
             logger.info("Subscribed to user data (fills, positions)")
         except Exception as e:
@@ -548,10 +675,10 @@ class WebSocketManager:
         """Async method to subscribe to user data with callbacks."""
         try:
             # Subscribe to fills with callback
-            self.ws_client.subscribe_fills(fill_callback)
+            await self.ws_client.subscribe_fills(fill_callback)
             
             # Subscribe to market positions with callback
-            self.ws_client.subscribe_market_positions(position_callback)
+            await self.ws_client.subscribe_market_positions(position_callback)
             
             logger.info("Subscribed to user data (fills, positions) with event callbacks")
         except Exception as e:
@@ -590,7 +717,7 @@ class WebSocketManager:
     async def _async_subscribe_position_tickers(self, market_tickers: List[str]):
         """Async method to subscribe to position tickers."""
         try:
-            self.ws_client.subscribe_market_ticker(market_tickers)
+            await self.ws_client.subscribe_market_ticker(market_tickers)
             logger.info(f"Subscribed to ticker updates for {len(market_tickers)} markets with positions")
         except Exception as e:
             logger.error(f"Error subscribing to position tickers: {e}")
@@ -598,7 +725,7 @@ class WebSocketManager:
     async def _async_subscribe_position_tickers_with_callback(self, market_tickers: List[str], callback):
         """Async method to subscribe to position tickers with callback."""
         try:
-            self.ws_client.subscribe_market_ticker(market_tickers, callback)
+            await self.ws_client.subscribe_market_ticker(market_tickers, callback)
             logger.info(f"Subscribed to ticker updates with callback for {len(market_tickers)} markets with positions")
         except Exception as e:
             logger.error(f"Error subscribing to position tickers with callback: {e}")

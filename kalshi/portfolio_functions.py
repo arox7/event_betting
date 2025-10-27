@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 
 from .http_client import KalshiHTTPClient
 from .shared_utils import create_sdk_client
+from .models import Order, OrdersResponse
 
 logger = logging.getLogger(__name__)
 
@@ -491,6 +492,43 @@ def get_all_unrealized_pnl(client: KalshiHTTPClient) -> Optional[Dict[str, Any]]
     except Exception as e:
         logger.error(f"Failed to get all unrealized P&L: {e}")
         return None
+
+def get_outstanding_orders(client: KalshiHTTPClient, limit: int = 100, cursor: Optional[str] = None) -> Optional[OrdersResponse]:
+    """Get outstanding orders from the portfolio."""
+    # Prepare parameters
+    params = {'limit': limit, 'status': 'resting'}
+    if cursor:
+        params['cursor'] = cursor
+    
+    # Make request
+    response = _make_request_with_retry(client, "GET", "/portfolio/orders", params)
+    if not response or response.status_code != 200:
+        logger.error(f"Failed to get outstanding orders: {response.status_code if response else 'No response'}")
+        return None
+    
+    orders_data = response.json()
+    logger.info(f"Retrieved {len(orders_data.get('orders', []))} outstanding orders")
+    
+    # Convert to Pydantic model
+    orders_response = OrdersResponse(**orders_data)
+    return orders_response
+
+def get_outstanding_orders_by_tickers(client: KalshiHTTPClient, tickers: List[str]) -> Dict[str, List[Order]]:
+    """Get outstanding orders filtered by specific tickers."""
+    # Get all outstanding orders
+    orders_response = get_outstanding_orders(client, limit=1000)  # Get more orders to ensure we capture all
+    if not orders_response:
+        logger.warning("No outstanding orders data available")
+        return {ticker: [] for ticker in tickers}
+    
+    # Filter orders by tickers
+    ticker_orders = {ticker: [] for ticker in tickers}
+    
+    for order in orders_response.orders:
+        if order.ticker in tickers:
+            ticker_orders[order.ticker].append(order)
+    
+    return ticker_orders
 
 def filter_market_positions_by_date(market_positions: List[Dict[str, Any]], start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
     """Filter market positions by date range based on last_updated_ts."""

@@ -14,8 +14,9 @@ from .market_functions import (
 from .portfolio_functions import (
     get_balance_dollars, get_all_positions, get_active_positions_only, get_settled_positions,
     get_fills, get_settlements, filter_market_positions_by_date, get_recent_pnl,
-    calculate_unrealized_pnl, get_all_unrealized_pnl
+    calculate_unrealized_pnl, get_all_unrealized_pnl, get_outstanding_orders, get_outstanding_orders_by_tickers
 )
+from .models import Order, OrdersResponse
 from .data_enricher import enrich_positions, get_enriched_positions
 from .metrics_calculator import calculate_portfolio_metrics, calculate_filtered_portfolio_metrics
 
@@ -118,6 +119,14 @@ class KalshiAPIClient:
     def get_all_unrealized_pnl(self) -> Optional[Dict[str, Any]]:
         """Calculate unrealized P&L for all positions."""
         return get_all_unrealized_pnl(self.http_client)
+    
+    def get_outstanding_orders(self, limit: int = 100, cursor: Optional[str] = None) -> Optional[OrdersResponse]:
+        """Get outstanding orders from the portfolio."""
+        return get_outstanding_orders(self.http_client, limit, cursor)
+    
+    def get_outstanding_orders_by_tickers(self, tickers: List[str]) -> Dict[str, List[Order]]:
+        """Get outstanding orders filtered by specific tickers."""
+        return get_outstanding_orders_by_tickers(self.http_client, tickers)
     
     # Data Enrichment Functions
     def enrich_positions(self, positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

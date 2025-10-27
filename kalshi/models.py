@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from kalshi_python.models.market import Market as KalshiMarket
 from kalshi_python.models.event import Event as KalshiEvent
-from pydantic import BaseModel, computed_field, field_validator, ValidationError
+from pydantic import BaseModel, computed_field, field_validator, ValidationError, Field
 
 # Note: models.py doesn't need to configure logging as it's imported by other modules
 # that will configure logging. We just get the logger here.
@@ -332,4 +332,44 @@ class MarketPosition(BaseModel):
     def is_closed_position(self) -> bool:
         """Check if this is a closed position (position = 0 but has trading history)."""
         return self.position == 0 and self.total_traded > 0
+
+
+class Order(BaseModel):
+    """Pydantic model for Kalshi orders based on the API documentation."""
+    
+    # Required fields
+    action: str = Field(..., description="The action type of the order")
+    client_order_id: str = Field(..., description="Client-provided order ID")
+    created_time: str = Field(..., description="Order creation timestamp")
+    fill_count: int = Field(..., description="Number of shares filled")
+    initial_count: int = Field(..., description="Initial number of shares in the order")
+    last_update_time: str = Field(..., description="Last update timestamp")
+    order_id: str = Field(..., description="Unique order ID")
+    remaining_count: int = Field(..., description="Number of shares remaining")
+    side: str = Field(..., description="Order side (yes/no)")
+    status: str = Field(..., description="Order status (resting/canceled/executed)")
+    ticker: str = Field(..., description="Market ticker")
+    type: str = Field(..., description="Order type")
+    user_id: str = Field(..., description="User ID who placed the order")
+    
+    # Optional fields
+    expiration_time: Optional[str] = Field(None, description="Order expiration timestamp")
+    maker_fees: Optional[int] = Field(None, description="Maker fees in cents")
+    maker_fill_cost: Optional[int] = Field(None, description="Maker fill cost in cents")
+    no_price: Optional[int] = Field(None, description="No price in cents")
+    no_price_dollars: Optional[str] = Field(None, description="No price in dollars")
+    order_group_id: Optional[str] = Field(None, description="Order group ID")
+    queue_position: Optional[int] = Field(None, description="Queue position")
+    self_trade_prevention_type: Optional[str] = Field(None, description="Self-trade prevention type")
+    taker_fees: Optional[int] = Field(None, description="Taker fees in cents")
+    taker_fill_cost: Optional[int] = Field(None, description="Taker fill cost in cents")
+    yes_price: Optional[int] = Field(None, description="Yes price in cents")
+    yes_price_dollars: Optional[str] = Field(None, description="Yes price in dollars")
+
+
+class OrdersResponse(BaseModel):
+    """Pydantic model for the orders API response."""
+    
+    cursor: Optional[str] = Field(None, description="Pagination cursor")
+    orders: List[Order] = Field(default_factory=list, description="List of orders")
 

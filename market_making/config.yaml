@@ -1,0 +1,7 @@
+markets:
+  - ticker: "KXCPIYOY-25OCT-T3.0"
+    side: "Both"
+    position_limit: 10
+  - ticker: "KXTRUMPOUT-26-TRUMP"
+    side: "No"
+    position_limit: 5
