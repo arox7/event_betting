@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional, Dict, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 @dataclass
 class MarketConfig:
@@ -9,6 +9,14 @@ class MarketConfig:
     ticker: str
     side: str
     position_limit: int
+    
+    # Quote management parameters
+    min_spread_cents: int = 2  # Only quote when spread >= 2 cents
+    min_price_delta_cents: int = 1  # Only requote if price moves >= 1 cent (hysteresis)
+    min_quote_time_seconds: float = 1.0  # Don't touch order for at least 1 second (MQT)
+    
+    # Exit parameters
+    exit_edge_threshold_cents: int = 2  # Undercut exit price if edge >= this many cents
 
 @dataclass
 class MarketState:
@@ -61,11 +69,24 @@ class ActiveOrder:
     intent_type: str
     placed_at: datetime
     remaining_size: int
+    last_modified_at: Optional[datetime] = None  # Track when order was last modified
+    
+    def __post_init__(self):
+        """Initialize last_modified_at if not provided."""
+        if self.last_modified_at is None:
+            self.last_modified_at = self.placed_at
     
     def is_stale(self, max_age_seconds: int = 60) -> bool:
         """Check if order is stale based on age."""
-        age = (datetime.now() - self.placed_at).total_seconds()
+        age = (datetime.now(timezone.utc) - self.placed_at).total_seconds()
         return age > max_age_seconds
+    
+    def can_modify(self, min_quote_time_seconds: float) -> bool:
+        """Check if order can be modified based on minimum quote time."""
+        if self.last_modified_at is None:
+            return True
+        time_since_modified = (datetime.now(timezone.utc) - self.last_modified_at).total_seconds()
+        return time_since_modified >= min_quote_time_seconds
     
     def is_price_stale(self, current_bid: Optional[int], current_ask: Optional[int], max_price_deviation: int = 5) -> bool:
         """Check if order price is stale based on market movement."""

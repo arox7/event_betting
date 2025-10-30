@@ -14,7 +14,8 @@ from .market_functions import (
 from .portfolio_functions import (
     get_balance_dollars, get_all_positions, get_active_positions_only, get_settled_positions,
     get_fills, get_settlements, filter_market_positions_by_date, get_recent_pnl,
-    calculate_unrealized_pnl, get_all_unrealized_pnl, get_outstanding_orders, get_outstanding_orders_by_tickers
+    calculate_unrealized_pnl, get_all_unrealized_pnl, get_outstanding_orders, get_outstanding_orders_by_tickers,
+    create_order, cancel_order
 )
 from .models import Order, OrdersResponse
 from .data_enricher import enrich_positions, get_enriched_positions
@@ -127,6 +128,23 @@ class KalshiAPIClient:
     def get_outstanding_orders_by_tickers(self, tickers: List[str]) -> Dict[str, List[Order]]:
         """Get outstanding orders filtered by specific tickers."""
         return get_outstanding_orders_by_tickers(self.http_client, tickers)
+    
+    async def create_order(
+        self, 
+        ticker: str, 
+        action: str, 
+        side: str, 
+        count: int, 
+        price_cents: int, 
+        order_type: str = "limit",
+        post_only: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        """Create a new order on Kalshi."""
+        return await create_order(self.http_client, ticker, action, side, count, price_cents, order_type, post_only)
+    
+    async def cancel_order(self, order_id: str) -> bool:
+        """Cancel an existing order on Kalshi."""
+        return await cancel_order(self.http_client, order_id)
     
     # Data Enrichment Functions
     def enrich_positions(self, positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

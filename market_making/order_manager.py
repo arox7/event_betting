@@ -38,6 +38,7 @@ class OrderManager:
     
     def add_order(self, order_id: str, intent: OrderIntent) -> ActiveOrder:
         """Add a new active order to tracking."""
+        now = datetime.now(timezone.utc)
         active_order = ActiveOrder(
             order_id=order_id,
             ticker=intent.ticker,
@@ -46,8 +47,9 @@ class OrderManager:
             size=intent.size,
             action=intent.action,
             intent_type=intent.intent_type,
-            placed_at=datetime.now(timezone.utc),
-            remaining_size=intent.size
+            placed_at=now,
+            remaining_size=intent.size,
+            last_modified_at=now
         )
         
         if intent.ticker not in self.state.active_orders:
@@ -157,48 +159,133 @@ class OrderManager:
     
     
     
-    def sync_target_orders(self, ticker: str, target_orders: List[OrderIntent]) -> Dict[str, List]:
+    def sync_target_orders(
+        self, 
+        ticker: str, 
+        target_orders: List[OrderIntent],
+        min_price_delta_cents: int = 1,
+        market_state: Optional['MarketState'] = None
+    ) -> Dict[str, List]:
         """
         Compare target orders with current orders and determine actions needed.
+        
+        Decision Priority (highest to lowest):
+        1. STALE orders → Cancel immediately (safety)
+        2. EXACT MATCH → Keep (no point replacing identical order)
+        3. Price delta too small → Keep (hysteresis)
+        4. Significant change → Cancel & Replace
         
         Args:
             ticker: Market ticker
             target_orders: List of OrderIntent representing desired order state
+            min_price_delta_cents: Minimum price movement to trigger requote (hysteresis)
+            market_state: Optional market state for staleness checks
             
         Returns:
             Dict with 'add', 'cancel', 'keep' lists of orders
         """
         current_orders = self.get_active_orders(ticker)
+        stale_orders = self.get_orders_to_cancel(ticker, market_state) if market_state else []
+        stale_order_ids = {o.order_id for o in stale_orders}
         
-        # Create a signature for each order to compare
-        def order_signature(order):
+        if stale_orders:
+            logger.info(f"[ORDER] {ticker}: Found {len(stale_orders)} stale orders")
+        
+        # Helper functions for order matching
+        def exact_sig(order) -> tuple:
+            """Signature for exact match: (side, action, price, size)"""
             return (order.side, order.action, order.price_cents, order.size)
         
-        # Create target signatures
-        target_signatures = {order_signature(intent): intent for intent in target_orders}
-        current_signatures = {order_signature(order): order for order in current_orders}
+        def type_sig(order) -> tuple:
+            """Signature for order type: (side, action)"""
+            return (order.side, order.action)
         
-        # Determine actions
-        actions = {
-            'add': [],      # Orders to place
-            'cancel': [],   # Orders to cancel  
-            'keep': []      # Orders to keep (unchanged)
-        }
+        # Build lookup tables
+        current_by_exact = {exact_sig(o): o for o in current_orders}
+        current_by_type = {}
+        for order in current_orders:
+            sig = type_sig(order)
+            current_by_type.setdefault(sig, []).append(order)
         
-        # Find orders to add (in target but not current)
-        for sig, intent in target_signatures.items():
-            if sig not in current_signatures:
+        target_types = {type_sig(intent) for intent in target_orders}
+        processed_order_ids = set()  # Track which current orders we've handled (by ID)
+        
+        actions = {'add': [], 'cancel': [], 'keep': []}
+        
+        # ==================== PHASE 1: Match targets to current orders ====================
+        for intent in target_orders:
+            # Priority 1: Check for exact match
+            if exact_sig(intent) in current_by_exact:
+                existing = current_by_exact[exact_sig(intent)]
+                if existing.order_id in stale_order_ids:
+                    # Stale: replace even if exact match
+                    actions['cancel'].append(existing)
+                    actions['add'].append(intent)
+                    logger.info(f"[ORDER] {ticker}: Replacing stale order (exact match)")
+                else:
+                    # Exact match, not stale: keep it
+                    actions['keep'].append(existing)
+                processed_order_ids.add(existing.order_id)
+                continue
+            
+            # Priority 2: Check for similar order (same type, different price/size)
+            matching = current_by_type.get(type_sig(intent), [])
+            similar = [o for o in matching if o.order_id not in processed_order_ids]
+            
+            if not similar:
+                # No matching order exists: add new
                 actions['add'].append(intent)
+                continue
+            
+            existing = similar[0]  # Take first unprocessed match
+            processed_order_ids.add(existing.order_id)
+            
+            # Priority 3: Is it stale?
+            if existing.order_id in stale_order_ids:
+                actions['cancel'].append(existing)
+                actions['add'].append(intent)
+                logger.info(f"[ORDER] {ticker}: Replacing stale order")
+                continue
+            
+            # Priority 4: Is price delta significant (hysteresis)?
+            price_delta = abs(intent.price_cents - existing.price_cents)
+            size_delta = abs(intent.size - existing.remaining_size)
+            
+            if price_delta < min_price_delta_cents and size_delta == 0:
+                actions['keep'].append(existing)
+                logger.debug(f"[ORDER] {ticker}: Keeping (price delta {price_delta}¢ < threshold)")
+                continue
+            
+            # Priority 5: Significant change → replace
+            actions['cancel'].append(existing)
+            actions['add'].append(intent)
+            if price_delta >= min_price_delta_cents:
+                logger.warning(
+                    f"[ORDER] {ticker}: Cancel/replace due to PRICE: "
+                    f"{existing.action} {existing.side} {existing.price_cents}¢→{intent.price_cents}¢ "
+                    f"(Δ={price_delta}¢, threshold={min_price_delta_cents}¢)"
+                )
+            else:
+                logger.warning(
+                    f"[ORDER] {ticker}: Cancel/replace due to SIZE: "
+                    f"{existing.action} {existing.side} @ {existing.price_cents}¢: "
+                    f"{existing.remaining_size}→{intent.size} (Δ={size_delta})"
+                )
         
-        # Find orders to cancel (in current but not target)
-        for sig, order in current_signatures.items():
-            if sig not in target_signatures:
+        # ==================== PHASE 2: Cancel unmatched current orders ====================
+        for order in current_orders:
+            if order.order_id in processed_order_ids:
+                continue  # Already handled
+            
+            # Stale orders: cancel immediately
+            if order.order_id in stale_order_ids:
                 actions['cancel'].append(order)
-        
-        # Find orders to keep (in both)
-        for sig in target_signatures:
-            if sig in current_signatures:
-                actions['keep'].append(current_signatures[sig])
+                logger.info(f"[ORDER] {ticker}: Cancelling stale order (orphaned)")
+                continue
+            
+            # Order type not in targets: cancel it
+            if type_sig(order) not in target_types:
+                actions['cancel'].append(order)
         
         logger.debug(
             f"[ORDER] Sync for {ticker}: add={len(actions['add'])}, "

@@ -572,3 +572,103 @@ def filter_market_positions_by_date(market_positions: List[Dict[str, Any]], star
             continue
     
     return filtered_positions
+
+
+async def create_order(
+    client: KalshiHTTPClient,
+    ticker: str,
+    action: str,  # "buy" or "sell"
+    side: str,  # "yes" or "no"
+    count: int,  # number of contracts
+    price_cents: int,  # limit price in cents
+    order_type: str = "limit",
+    post_only: bool = True  # Reject if order would cross spread (maker-only)
+) -> Optional[Dict[str, Any]]:
+    """
+    Create a new order on Kalshi.
+    
+    Args:
+        client: HTTP client
+        ticker: Market ticker
+        action: "buy" or "sell"
+        side: "yes" or "no"
+        count: Number of contracts
+        price_cents: Limit price in cents
+        order_type: Order type (default: "limit")
+        post_only: If True, reject if order crosses spread (default: True for maker orders)
+        
+    Returns:
+        Order response dict with order_id, or None on failure
+    """
+    try:
+        payload = {
+            "ticker": ticker,
+            "action": action,
+            "side": side,
+            "count": count,
+            "type": order_type,
+            "yes_price": price_cents if side == "yes" else None,
+            "no_price": price_cents if side == "no" else None,
+            "post_only": post_only
+        }
+        
+        # Remove None values (but keep False boolean values)
+        payload = {k: v for k, v in payload.items() if v is not None}
+        
+        response = await client.make_authenticated_request("POST", "/portfolio/orders", json_data=payload)
+        
+        if response.status_code == 200 or response.status_code == 201:
+            data = response.json()
+            order_data = data.get("order", {})
+            order_id = order_data.get("order_id")
+            
+            if order_id:
+                logger.info(
+                    f"✓ Order placed: {action} {count} {side.upper()} @ {price_cents}¢ "
+                    f"on {ticker} (ID: {order_id[:12]}...)"
+                )
+                return order_data
+            else:
+                logger.error(f"Order response missing order_id: {data}")
+                return None
+        else:
+            logger.error(
+                f"Failed to create order: {response.status_code} - {response.text}"
+            )
+            return None
+            
+    except Exception as e:
+        logger.error(f"Exception creating order for {ticker}: {e}")
+        return None
+
+
+async def cancel_order(client: KalshiHTTPClient, order_id: str) -> bool:
+    """
+    Cancel an existing order on Kalshi.
+    
+    Args:
+        client: HTTP client
+        order_id: The order ID to cancel
+        
+    Returns:
+        True if cancelled successfully, False otherwise
+    """
+    try:
+        response = await client.make_authenticated_request("DELETE", f"/portfolio/orders/{order_id}")
+        
+        if response.status_code == 200 or response.status_code == 204:
+            logger.info(f"✓ Order cancelled: {order_id[:12]}...")
+            return True
+        elif response.status_code == 404:
+            logger.warning(f"Order not found (already filled/cancelled?): {order_id[:12]}...")
+            return True  # Treat as success since it's no longer active
+        else:
+            logger.error(
+                f"Failed to cancel order {order_id[:12]}...: "
+                f"{response.status_code} - {response.text}"
+            )
+            return False
+            
+    except Exception as e:
+        logger.error(f"Exception cancelling order {order_id[:12]}...: {e}")
+        return False

@@ -4,6 +4,7 @@ Kalshi HTTP Client - Base HTTP client with authentication and caching.
 import logging
 import base64
 import time
+import asyncio
 import requests
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
@@ -167,14 +168,14 @@ class KalshiHTTPClient:
         
         return encoded_signature
     
-    def make_authenticated_request(self, method: str, path: str, params: Optional[Dict] = None, json_data: Optional[Dict] = None) -> requests.Response:
+    async def make_authenticated_request(self, method: str, path: str, params: Optional[Dict] = None, json_data: Optional[Dict] = None) -> requests.Response:
         """Make an authenticated request to the Kalshi API using raw HTTP."""
         if not self.config.KALSHI_API_KEY_ID or not self._private_key:
             raise Exception("API credentials not properly configured")
         
-        return self._make_authenticated_request_internal(method, path, params, json_data)
+        return await self._make_authenticated_request_internal(method, path, params, json_data)
     
-    def _make_authenticated_request_internal(self, method: str, path: str, params: Optional[Dict] = None, json_data: Optional[Dict] = None, retry_count: int = 0) -> requests.Response:
+    async def _make_authenticated_request_internal(self, method: str, path: str, params: Optional[Dict] = None, json_data: Optional[Dict] = None, retry_count: int = 0) -> requests.Response:
         """Internal method to make authenticated request (called with lock)."""
         
         # Track request frequency
@@ -213,7 +214,7 @@ class KalshiHTTPClient:
                 if time_since_last_order < self._min_order_interval:
                     sleep_time = self._min_order_interval - time_since_last_order
                     logger.info(f"[AUTH] Order throttling: sleeping {sleep_time:.2f}s")
-                    time.sleep(sleep_time)
+                    await asyncio.sleep(sleep_time)
             self._last_order_time = time.time()
         
         # Create timestamp for this request

@@ -1,7 +1,12 @@
+# Global settings
+dry_run: false  # If true, log order actions without actually placing/cancelling orders
+
+# Market configurations
 markets:
-  - ticker: "KXCPIYOY-25OCT-T3.0"
-    side: "Both"
-    position_limit: 10
-  - ticker: "KXTRUMPOUT-26-TRUMP"
+  - ticker: "KXNBAGAME-25OCT29LALMIN-MIN"
     side: "No"
-    position_limit: 5
+    position_limit: 1
+    min_spread_cents: 1  # Only quote when spread >= 2 cents
+    min_price_delta_cents: 3  # Only requote if price moves >= 1 cent
+    min_quote_time_seconds: 60.0  # Orders go stale after 60 seconds
+    exit_edge_threshold_cents: 3  # Undercut exit price if profit >= 2¢

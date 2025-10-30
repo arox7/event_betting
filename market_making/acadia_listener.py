@@ -6,6 +6,7 @@ maintaining order book state, and updating the strategy with market data.
 """
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, List
 
@@ -115,23 +116,35 @@ class MarketListener:
             market_state.no_bid = best_no_bid.price
             market_state.no_ask = best_no_ask.price
             
-            logger.debug(
-                f"[{self.ticker}] Updated market state: "
+            # Debug: Show top levels of each side
+            yes_levels = self.orderbook_tracker.top_levels("yes", max_levels=3)
+            no_levels = self.orderbook_tracker.top_levels("no", max_levels=3)
+            
+            logger.info(
+                f"[{self.ticker}] Orderbook: "
                 f"YES {best_yes_bid.price}/{best_yes_ask.price}, "
-                f"NO {best_no_bid.price}/{best_no_ask.price}"
+                f"NO {best_no_bid.price}/{best_no_ask.price} | "
+                f"YES levels: {yes_levels}, NO levels: {no_levels}"
             )
             
             # Get strategy actions (add/cancel/keep orders)
             actions = self.strategy.generate_orders(self.ticker)
             
+            # Log order sync summary
+            if actions['keep'] and not actions['add'] and not actions['cancel']:
+                logger.debug(
+                    f"[{self.ticker}] Keeping {len(actions['keep'])} orders unchanged "
+                    f"(likely MQT or hysteresis throttling)"
+                )
+            
             # Execute the actions
-            actions_taken = self._execute_order_actions(actions)
+            actions_taken = await self._execute_order_actions(actions)
             
             # Only log position summary if we took actions or if position changed
             if actions_taken:
                 self._log_position_summary()
     
-    def _execute_order_actions(self, actions: Dict[str, List]) -> bool:
+    async def _execute_order_actions(self, actions: Dict[str, List]) -> bool:
         """
         Execute order actions returned by the strategy.
         
@@ -145,20 +158,57 @@ class MarketListener:
         
         # Cancel orders that are no longer wanted
         for order in actions.get('cancel', []):
-            logger.info(f"[{self.ticker}] Cancelling order: {order.action} {order.side} @ {order.price_cents}")
-            # TODO: Actually cancel the order on the exchange
-            # For now, just remove from tracking
-            self.strategy.order_manager.remove_order(order.order_id, self.ticker)
-            actions_taken = True
+            if self.strategy.dry_run:
+                logger.info(f"[{self.ticker}] 🧪 DRY RUN: Would cancel order: {order.action} {order.side} @ {order.price_cents}¢ (ID: {order.order_id[:12]}...)")
+                # In dry run, still remove from tracking to simulate the cancellation
+                self.strategy.order_manager.remove_order(order.order_id, self.ticker)
+                actions_taken = True
+            else:
+                logger.info(f"[{self.ticker}] Cancelling order: {order.action} {order.side} @ {order.price_cents}¢ (ID: {order.order_id[:12]}...)")
+                # Cancel the order on Kalshi
+                success = await self.api_client.cancel_order(order.order_id)
+                if success:
+                    # Remove from local tracking
+                    self.strategy.order_manager.remove_order(order.order_id, self.ticker)
+                    actions_taken = True
+                else:
+                    logger.error(f"[{self.ticker}] Failed to cancel order {order.order_id[:12]}...")
         
         # Add new orders
         for intent in actions.get('add', []):
-            logger.info(f"[{self.ticker}] Placing order: {intent.action} {intent.side} @ {intent.price_cents}")
-            # TODO: Actually place the order on the exchange and get order ID
-            # For now, simulate with a fake order ID
-            fake_order_id = f"fake_{self.ticker}_{intent.side}_{intent.action}_{intent.price_cents}"
-            self.strategy.order_manager.add_order(fake_order_id, intent)
-            actions_taken = True
+            if self.strategy.dry_run:
+                logger.info(f"[{self.ticker}] 🧪 DRY RUN: Would place order: {intent.action} {intent.side} {intent.size} @ {intent.price_cents}¢ ({intent.intent_type})")
+                # In dry run, add a fake order to tracking to simulate the placement
+                fake_order_id = f"dry_run_{uuid.uuid4().hex[:16]}"
+                self.strategy.order_manager.add_order(fake_order_id, intent)
+                actions_taken = True
+            else:
+                # Determine if this is an aggressive exit that should cross the spread
+                post_only = intent.intent_type != "aggressive_exit"
+                
+                logger.info(
+                    f"[{self.ticker}] Placing order: {intent.action} {intent.side} {intent.size} @ {intent.price_cents}¢ "
+                    f"(type={intent.intent_type}, post_only={post_only})"
+                )
+                
+                # Place the order on Kalshi
+                order_response = await self.api_client.create_order(
+                    ticker=self.ticker,
+                    action=intent.action,
+                    side=intent.side,
+                    count=intent.size,
+                    price_cents=intent.price_cents,
+                    order_type="limit",
+                    post_only=post_only
+                )
+                
+                if order_response and 'order_id' in order_response:
+                    order_id = order_response['order_id']
+                    # Add to local tracking with the real Kalshi order ID
+                    self.strategy.order_manager.add_order(order_id, intent)
+                    actions_taken = True
+                else:
+                    logger.error(f"[{self.ticker}] Failed to place order: {intent.action} {intent.side} {intent.size} @ {intent.price_cents}¢")
         
         # Keep orders (no action needed, they're already tracked)
         keep_count = len(actions.get('keep', []))
@@ -171,13 +221,18 @@ class MarketListener:
         """Log position summary when position changes or actions are taken."""
         if self.ticker in self.strategy.position_states:
             position_state = self.strategy.position_states[self.ticker]
+            
+            # Format values safely (handle None)
+            pnl_str = f"{position_state.unrealized_pnl_cents}c" if position_state.unrealized_pnl_cents is not None else "N/A"
+            return_str = f"{position_state.position_return_pct:.1f}%" if position_state.position_return_pct is not None else "N/A"
+            
             logger.info(
                 f"[{self.ticker}] Position Summary: "
                 f"pos={position_state.position}, "
                 f"entry_yes={position_state.avg_entry_price_yes}, "
                 f"entry_no={position_state.avg_entry_price_no}, "
-                f"pnl={position_state.unrealized_pnl_cents}c, "
-                f"return={position_state.position_return_pct:.1f}%"
+                f"pnl={pnl_str}, "
+                f"return={return_str}"
             )
     
     async def _on_public_trade(self, payload: Dict[str, Any]) -> None:
@@ -236,7 +291,25 @@ class MarketListener:
         side = body.get("side", "").lower()
         action = body.get("action", "").lower()
         count = int(body.get("count", 0) or 0)
-        price_cents = body.get("price", 0)  # Fill price in cents
+        
+        # Get fill price based on side
+        if side == "yes":
+            price_cents = body.get("yes_price", 0)
+        elif side == "no":
+            price_cents = body.get("no_price", 0)
+        else:
+            price_cents = 0
+        
+        # Debug: log fill message if price is 0
+        if price_cents == 0:
+            logger.warning(f"[{self.ticker}] Fill price is 0! Full fill payload: {body}")
+            
+        order_id = body.get("order_id")
+        
+        # Update order tracking if we have the order_id
+        if order_id:
+            filled_count = int(body.get("count", 0) or 0)
+            self.strategy.order_manager.update_order_fill(order_id, self.ticker, filled_count)
         
         if count > 0 and self.ticker in self.strategy.position_states:
             position_state = self.strategy.position_states[self.ticker]
@@ -269,6 +342,17 @@ class MarketListener:
                 f"avg_entry_yes={position_state.avg_entry_price_yes}, "
                 f"avg_entry_no={position_state.avg_entry_price_no}"
             )
+            
+            # Regenerate orders after fill to immediately place exit orders if needed
+            # and update market making quotes based on new position
+            actions = self.strategy.generate_orders(self.ticker)
+            actions_taken = await self._execute_order_actions(actions)
+            
+            if actions_taken:
+                logger.info(
+                    f"[{self.ticker}] Post-fill order update: "
+                    f"added={len(actions['add'])}, cancelled={len(actions['cancel'])}, kept={len(actions['keep'])}"
+                )
             
             # Log position summary after fill (position changed)
             self._log_position_summary()
@@ -351,8 +435,23 @@ class MarketListener:
         }
         
         if market_ticker == self.ticker and self.ticker in self.strategy.position_states:
+            old_position = self.strategy.position_states[self.ticker].position
             self.strategy.position_states[self.ticker].position = position_contracts
             logger.info(
-                f"[{self.ticker}] Position update: {position_contracts} contracts"
+                f"[{self.ticker}] Position update: {position_contracts} contracts (was {old_position})"
             )
+            
+            # If position changed, regenerate orders to ensure exit orders are placed
+            if old_position != position_contracts:
+                actions = self.strategy.generate_orders(self.ticker)
+                actions_taken = await self._execute_order_actions(actions)
+                
+                if actions_taken:
+                    logger.info(
+                        f"[{self.ticker}] Post-position-sync order update: "
+                        f"added={len(actions['add'])}, cancelled={len(actions['cancel'])}, kept={len(actions['keep'])}"
+                    )
+                
+                # Log position summary after position sync
+                self._log_position_summary()
 

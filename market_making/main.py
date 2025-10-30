@@ -28,14 +28,15 @@ logger = logging.getLogger(__name__)
 class MarketMakingBot:
     """Main market making bot class."""
     
-    def __init__(self, config: Config, market_configs: List[MarketConfig]):
+    def __init__(self, config: Config, market_configs: List[MarketConfig], dry_run: bool = False):
         self.config = config
         self.market_configs = market_configs
+        self.dry_run = dry_run
         self.api_client = KalshiAPIClient(config)
         self.ws_client = KalshiWebSocketClient(config)
         self.current_positions: Dict[str, Any] = {}
         self.outstanding_orders: Dict[str, List[Order]] = {}
-        self.strategy = AcadiaStrategy(self.market_configs)
+        self.strategy = AcadiaStrategy(self.market_configs, dry_run=dry_run)
         
         # Create listeners for each market
         self.listeners: Dict[str, MarketListener] = {}
@@ -47,7 +48,7 @@ class MarketMakingBot:
                 strategy=self.strategy,
             )
 
-        logger.info(f"Initialized bot for {len(market_configs)} markets")
+        logger.info(f"Initialized bot for {len(market_configs)} markets (dry_run={dry_run})")
 
         # Get all tickers we're trading
         self.tickers = [market.ticker for market in self.market_configs]
@@ -190,27 +191,40 @@ class MarketMakingBot:
         
         logger.info("All subscriptions complete")
 
-def load_market_configs(config_path: str) -> List[MarketConfig]:
-    """Load market configurations from YAML file."""
+def load_config_file(config_path: str) -> tuple[List[MarketConfig], bool]:
+    """
+    Load market configurations and settings from YAML file.
+    
+    Returns:
+        Tuple of (market_configs, dry_run)
+    """
     try:
         with open(config_path, 'r') as f:
             data = yaml.safe_load(f)
             
+        # Parse market configurations
         market_configs = []
         for market_data in data.get('markets', []):
             config = MarketConfig(
                 ticker=market_data['ticker'],
                 side=market_data['side'],
-                position_limit=market_data['position_limit']
+                position_limit=market_data['position_limit'],
+                min_spread_cents=market_data.get('min_spread_cents', 2),
+                min_price_delta_cents=market_data.get('min_price_delta_cents', 1),
+                min_quote_time_seconds=market_data.get('min_quote_time_seconds', 1.0),
+                exit_edge_threshold_cents=market_data.get('exit_edge_threshold_cents', 2)
             )
             market_configs.append(config)
+        
+        # Get dry_run setting
+        dry_run = data.get('dry_run', False)
             
-        logger.info(f"Loaded {len(market_configs)} market configurations")
-        return market_configs
+        logger.info(f"Loaded {len(market_configs)} market configurations (dry_run={dry_run})")
+        return market_configs, dry_run
         
     except Exception as e:
-        logger.error(f"Error loading market configs from {config_path}: {e}")
-        return []
+        logger.error(f"Error loading config from {config_path}: {e}")
+        return [], False
 
 async def async_main():
     """Async main function."""
@@ -227,15 +241,15 @@ async def async_main():
     setup_logging(level=logging.INFO, include_filename=True)
     logger.info("Starting market making bot")
     
-    # Load market configurations
-    market_configs = load_market_configs(args.config)
+    # Load config file (YAML) - loads market configs and dry_run setting
+    market_configs, dry_run = load_config_file(args.config)
     if not market_configs:
         logger.error("No market configurations loaded. Exiting.")
         return
-        
-    # Initialize config and bot
+    
+    # Initialize Kalshi API config and bot
     config = Config()
-    bot = MarketMakingBot(config, market_configs)
+    bot = MarketMakingBot(config, market_configs, dry_run=dry_run)
     
     # Initialize bot state (positions and orders)
     bot.initialize_state()
