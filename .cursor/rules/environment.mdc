@@ -5,5 +5,5 @@ alwaysApply: true
 ---
 
 Run this when testing code to set up your proper environment: 
-    - source ~/.bash_profile 
+    - source ~/.zshrc
     - conda activate event_betting

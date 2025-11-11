@@ -4,3 +4,7 @@
 market_bot.log
 logs/*
 __pycache__/*
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
